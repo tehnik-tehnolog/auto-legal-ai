@@ -127,16 +127,24 @@ with st.sidebar:
     st.write(f"• Решения ВС РФ: **{len(court_data)} актов**")
     st.write(f"• Новостных статей: **{len(news_data)} шт.**")
 
+    # Кнопка переиндексации
+    if st.button("🔄 Переиндексировать RAG (ChromaDB + BM25)", use_container_width=True):
+        with st.spinner("Переиндексация 4 коллекций..."):
+            try:
+                from rag_pipeline.indexer import ChromaRAGIndexer
+                indexer = ChromaRAGIndexer()
+                res = indexer.index_all()
+                st.success(f"Индексация завершена! Чанков: {res['total_chunks']}")
+            except Exception as e:
+                st.error(f"Ошибка индексации: {e}")
+
     st.caption("Сервер: Windows 10 (локальный ПК) / WSL2 / Docker")
 
 
 # --- VIEW 1: ЧАТ RAG-АССИСТЕНТА ---
 if selected_view == "💬 RAG Ассистент (Чат)":
     st.header("💬 RAG Помощник по раскату и лизингу автомобилей")
-    st.write(
-        "Задайте вопрос по договорам раската/лизинга, условиям выкупа, статьям ГК/НК РФ, "
-        "позициям Верховного Суда или наличию авто в автопарке."
-    )
+    st.caption("Пайплайн: Query Router ➔ BM25 + Dense ➔ Metadata Boost ➔ Reranker ➔ Gemini 3.1 Flash Lite")
 
     # Инициализация истории сообщений
     if "messages" not in st.session_state:
@@ -153,12 +161,36 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                     "- *Как рассчитывается выкупная стоимость автомобиля по ст. 665 ГК РФ?*\n"
                     "- *Как повышение утильсбора влияет на лизинговые платежи?*"
                 ),
+                "sources": []
             }
         ]
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
+            if msg.get("targets"):
+                target_labels = {
+                    "car_catalog": "🚗 Автопарк raskatof.ru",
+                    "legal_laws": "📜 Законы (ГК/НК РФ)",
+                    "court_cases": "⚖️ ВС РФ (Судебная практика)",
+                    "auto_news": "📰 Автоновости и рынок"
+                }
+                badges = [target_labels.get(t, t) for t in msg["targets"]]
+                st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
+
             st.markdown(msg["content"])
+
+            if msg.get("sources"):
+                with st.expander(f"📚 Использованные первоисточники ({len(msg['sources'])} документов)"):
+                    for s in msg["sources"]:
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.markdown(f"**[{s['title']}]({s['url']})**")
+                            if s.get("case_number"):
+                                st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
+                            st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
+                        with col_b:
+                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}")
+                        st.divider()
 
     if prompt := st.chat_input("Введите ваш вопрос..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -166,60 +198,51 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            response_container = st.container()
+            with st.spinner("Поиск по разделенным коллекциям (Router + BM25 + Dense + Reranker)..."):
+                try:
+                    from rag_pipeline.generator import RAGAssistant
+                    assistant = RAGAssistant()
+                    rag_result = assistant.answer_query(prompt)
+                    answer_text = rag_result["answer"]
+                    targets = rag_result.get("target_collections", [])
+                    sources = rag_result.get("sources", [])
+                except Exception as rag_err:
+                    answer_text = f"Ошибка RAG пайплайна: {rag_err}"
+                    targets = []
+                    sources = []
 
-            # Имитация поиска в локальной RAG-базе (semantic retrieval simulation)
-            prompt_lower = prompt.lower()
-            context_sources = []
-
-            # Поиск в автопарке
-            matching_cars = [c for c in cars_data if any(w in c.get('model', '').lower() for w in prompt_lower.split()) or "машин" in prompt_lower or "авто" in prompt_lower or "наличи" in prompt_lower]
-            if matching_cars:
-                sample_c = matching_cars[0]
-                context_sources.append(f"Каталог raskatof.ru: {sample_c.get('model')} (Категория: {sample_c.get('category')}, {sample_c.get('leasing_terms', {}).get('daily_rate', '')})")
-
-            # Поиск в законах
-            if any(w in prompt_lower for w in ["гк", "стать", "договор", "лизин", "аренд", "выкуп", "налог", "ндс"]):
-                context_sources.append("Нормативная база: ГК РФ Статья 665 (Финансовая аренда/лизинг), ст. 624 (Выкуп арендованного имущества)")
-
-            # Поиск в ВС РФ
-            if any(w in prompt_lower for w in ["суд", "вс рф", "спор", "практик", "банкрот", "изъяти"]):
-                context_sources.append("Судебная практика ВС РФ: Определение Судебной коллегии по гражданским делам № 5-КГ23-104-К2 по спорам об изъятии предмета лизинга")
-
-            answer_text = (
-                f"**Ответ RAG-помощника на основе собранной базы данных:**\n\n"
-                f"По вашему запросу *«{prompt}»* найдена информация в актуальных документах компании:\n\n"
-            )
-
-            if "машин" in prompt_lower or "авто" in prompt_lower or "цен" in prompt_lower or "взнос" in prompt_lower:
-                answer_text += (
-                    "**1. По автопарку raskatof.ru:**\n"
-                    "В каталоге представлены популярные модели под выкуп (Chery Tiggo 4 Pro, Haval Jolion, Geely Coolray). "
-                    "Суточная аренда начинается от 2 400 ₽/сутки, первоначальный взнос от 15 000 ₽. "
-                    "Все машины оснащены АКПП/вариатором и готовы к передаче в день заключения договора.\n\n"
-                )
-
-            if "суд" in prompt_lower or "банкрот" in prompt_lower or "риск" in prompt_lower:
-                answer_text += (
-                    "**2. По судебной практике Верховного Суда РФ:**\n"
-                    "Согласно правовой позиции ВС РФ (2021–2026 гг.), при нарушении графика платежей или расторжении договора "
-                    "раската сальдо взаимных обязательств сторон определяется с учетом фактической амортизации ТС. "
-                    "В случае банкротства физического лица автомобиль, находящийся в финансовой аренде с оговоркой о сохранении права собственности за компанией до полной выплаты выкупной стоимости, подлежит возврату арендодателю.\n\n"
-                )
-
-            answer_text += (
-                "**3. Правовое и налоговое основание:**\n"
-                "Отношения регулируются § 6 главы 34 ГК РФ (Финансовая аренда) и ст. 624 ГК РФ. "
-                "В налоговом учете (ст. 264 НК РФ) лизинговые платежи относятся к расходам за вычетом выкупной стоимости.\n\n"
-            )
-
-            if context_sources:
-                answer_text += "\n---\n*Использованные источники из базы данных:*\n"
-                for cs in context_sources:
-                    answer_text += f"- 📌 {cs}\n"
+            # Отображаем плашку роутера
+            if targets:
+                target_labels = {
+                    "car_catalog": "🚗 Автопарк raskatof.ru",
+                    "legal_laws": "📜 Законы (ГК/НК РФ)",
+                    "court_cases": "⚖️ ВС РФ (Судебная практика)",
+                    "auto_news": "📰 Автоновости и рынок"
+                }
+                badges = [target_labels.get(t, t) for t in targets]
+                st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
 
             st.markdown(answer_text)
-            st.session_state.messages.append({"role": "assistant", "content": answer_text})
+
+            if sources:
+                with st.expander(f"📚 Использованные первоисточники ({len(sources)} документов)"):
+                    for s in sources:
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.markdown(f"**[{s['title']}]({s['url']})**")
+                            if s.get("case_number"):
+                                st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
+                            st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
+                        with col_b:
+                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}")
+                        st.divider()
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer_text,
+                "targets": targets,
+                "sources": sources
+            })
 
 
 # --- VIEW 2: КАТАЛОГ АВТОМОБИЛЕЙ (raskatof.ru) ---

@@ -28,7 +28,16 @@ pip install -r requirements.txt
 playwright install chromium
 \`\`\`
 
-### Шаг 3. Запуск веб-части Streamlit
+### Шаг 3. Индексация базы RAG в ChromaDB + BM25
+\`\`\`cmd
+# Способ 1: двойным кликом по файлу
+reindex_rag.bat
+
+# Способ 2: в терминале
+python reindex_rag.py
+\`\`\`
+
+### Шаг 4. Запуск веб-части Streamlit
 \`\`\`cmd
 # Способ 1: через терминал
 streamlit run streamlit_app.py
@@ -97,6 +106,8 @@ streamlit run streamlit_app.py
   zip.file(
     'requirements.txt',
     `streamlit>=1.40.0
+chromadb>=0.5.0
+google-genai>=0.1.1
 pandas>=2.2.0
 playwright>=1.42.0
 requests>=2.31.0
@@ -235,20 +246,55 @@ with st.sidebar:
     st.write(f"• Авто в каталоге: **{len(cars)}**")
     st.write(f"• Актов ВС РФ: **{len(court)}**")
     st.write(f"• Новостей: **{len(news)}**")
+    if st.button("🔄 Переиндексировать RAG (ChromaDB + BM25)", use_container_width=True):
+        with st.spinner("Переиндексация 4 коллекций..."):
+            try:
+                from rag_pipeline.indexer import ChromaRAGIndexer
+                indexer = ChromaRAGIndexer()
+                res = indexer.index_all()
+                st.success(f"Индексация завершена! Чанков: {res['total_chunks']}")
+            except Exception as e:
+                st.error(f"Ошибка индексации: {e}")
 
 if menu == "💬 RAG Ассистент (Чат)":
     st.header("💬 RAG Помощник по раскату и выкупу авто")
-    st.info("Задавайте вопросы по наличию машин, условиям выкупа, статьям ГК/НК РФ и позициям ВС РФ.")
-    if "chat" not in st.session_state:
-        st.session_state.chat = [{"role": "assistant", "content": "Здравствуйте! Я RAG-помощник компании по раскату авто. Чем могу помочь?"}]
-    for m in st.session_state.chat:
-        st.chat_message(m["role"]).write(m["content"])
-    if q := st.chat_input("Ваш вопрос..."):
-        st.session_state.chat.append({"role": "user", "content": q})
-        st.chat_message("user").write(q)
-        resp = f"**Ответ по RAG-базе:**\\nПо вашему запросу '{q}' проверен автопарк raskatof.ru, нормы ст. 665 ГК РФ и судебная практика ВС РФ."
-        st.session_state.chat.append({"role": "assistant", "content": resp})
-        st.chat_message("assistant").write(resp)
+    st.caption("Пайплайн: Query Router ➔ BM25 + Dense ➔ Metadata Boost ➔ Reranker ➔ Gemini 3.1 Flash Lite")
+    if "messages" not in st.session_state:
+        st.session_state.messages = [{"role": "assistant", "content": "Здравствуйте! Я RAG-помощник компании по раскату авто. Задайте вопрос по автопарку, условиям выкупа, статьям ГК/НК РФ или решениям ВС РФ.", "sources": []}]
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            if m.get("targets"):
+                t_labels = {"car_catalog": "🚗 Автопарк", "legal_laws": "📜 Законы", "court_cases": "⚖️ ВС РФ", "auto_news": "📰 Новости"}
+                st.caption(f"🎯 **Коллекции поиска:** {' • '.join([t_labels.get(t, t) for t in m['targets']])}")
+            st.markdown(m["content"])
+            if m.get("sources"):
+                with st.expander(f"📚 Первоисточники ({len(m['sources'])})"):
+                    for s in m["sources"]:
+                        st.markdown(f"**[{s['title']}]({s['url']})**")
+                        st.caption(f"Фрагмент: {s['matched_chunk'][:220]}...")
+    if prompt := st.chat_input("Ваш вопрос..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Поиск по RAG-базе (Router + BM25 + Dense + Rerank)..."):
+                try:
+                    from rag_pipeline.generator import RAGAssistant
+                    assistant = RAGAssistant()
+                    res = assistant.answer_query(prompt)
+                    ans, targets, sources = res["answer"], res.get("target_collections", []), res.get("sources", [])
+                except Exception as err:
+                    ans, targets, sources = f"Ошибка RAG пайплайна: {err}", [], []
+            if targets:
+                t_labels = {"car_catalog": "🚗 Автопарк", "legal_laws": "📜 Законы", "court_cases": "⚖️ ВС РФ", "auto_news": "📰 Новости"}
+                st.caption(f"🎯 **Коллекции поиска:** {' • '.join([t_labels.get(t, t) for t in targets])}")
+            st.markdown(ans)
+            if sources:
+                with st.expander(f"📚 Использованные первоисточники ({len(sources)} документов)"):
+                    for s in sources:
+                        st.markdown(f"**[{s['title']}]({s['url']})**")
+                        st.caption(f"Фрагмент: {s['matched_chunk'][:220]}...")
+            st.session_state.messages.append({"role": "assistant", "content": ans, "targets": targets, "sources": sources})
 
 elif menu == "🚙 Каталог авто (raskatof.ru)":
     st.header("🚙 Актуальный автопарк raskatof.ru")
@@ -436,6 +482,507 @@ RASKATOF_URL = "https://raskatof.ru/"
         `import asyncio, yaml\nfrom datetime import datetime\nfrom playwright.async_api import async_playwright\nfrom collectors.base import BaseCollector\nfrom config.settings import LEGAL_DIR, CNTD_THEME_URL, USER_AGENT\n\nclass LawsCollector(BaseCollector):\n    def __init__(self):\n        super().__init__("laws_gk_nk")\n        self.output_dir = LEGAL_DIR\n    async def collect(self):\n        saved = 0\n        async with async_playwright() as p:\n            b = await p.chromium.launch(headless=True, args=["--no-sandbox"])\n            ctx = await b.new_context(user_agent=USER_AGENT)\n            page = await ctx.new_page()\n            await page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font", "media"] else r.continue_())\n            await page.goto(CNTD_THEME_URL, wait_until="domcontentloaded", timeout=45000)\n            await page.wait_for_selector(".document-list, body", timeout=20000)\n            for it in (await page.locator("li.document-list_i").all())[:30]:\n                try:\n                    h = await it.locator("a.document-list_i_lk").first.get_attribute("href") or ""\n                    t = (await it.locator("div.document-list_i_t").first.inner_text()).strip()\n                    dp = await ctx.new_page()\n                    await dp.goto(f"https://docs.cntd.ru{h}", wait_until="domcontentloaded", timeout=20000)\n                    txt = await dp.locator("body").inner_text()\n                    await dp.close()\n                    meta = {"title": t, "source_site": "docs.cntd.ru", "priority_level": "high"}\n                    with open(self.output_dir / f"doc_{saved+1}.md", "w", encoding="utf-8") as f:\n                        f.write(f"---\\n{yaml.dump(meta)}---\\n\\n# {t}\\n\\n{txt}")\n                    saved += 1\n                except Exception:\n                    continue\n            await b.close()\n        return {"items_collected": saved}\n`
       );
     }
+  }
+
+  // reindex scripts
+  zip.file(
+    'reindex_rag.bat',
+    `@echo off
+cd /d "%~dp0"
+if exist "venv\\Scripts\\python.exe" (
+    venv\\Scripts\\python.exe reindex_rag.py
+) else if exist ".venv\\Scripts\\python.exe" (
+    .venv\\Scripts\\python.exe reindex_rag.py
+) else (
+    python reindex_rag.py
+)
+pause
+`
+  );
+
+  zip.file(
+    'reindex_rag.py',
+    `#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+cur_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(cur_dir))
+
+from rag_pipeline.indexer import ChromaRAGIndexer
+
+def main():
+    print("=" * 70)
+    print("🚀 ЗАПУСК ИНДЕКСАЦИИ БАЗЫ ДАННЫХ RAG В CHROMADB")
+    print("=" * 70)
+    indexer = ChromaRAGIndexer()
+    stats = indexer.index_all()
+    print("=" * 70)
+    print(f"✅ Чанков создано: {stats['total_chunks']}, Документов: {stats['parent_docs_count']}")
+    for coll, count in stats["collections"].items():
+        print(f"  • [{coll}]: {count} чанков")
+    print("=" * 70)
+
+if __name__ == "__main__":
+    main()
+`
+  );
+
+  // rag_pipeline folder
+  const pipelineFolder = zip.folder('rag_pipeline');
+  if (pipelineFolder) {
+    pipelineFolder.file(
+      '__init__.py',
+      `from rag_pipeline.generator import RAGAssistant
+from rag_pipeline.retriever import HybridRetriever
+from rag_pipeline.indexer import ChromaRAGIndexer
+from rag_pipeline.chunker import RAGChunker
+
+__all__ = ["RAGAssistant", "HybridRetriever", "ChromaRAGIndexer", "RAGChunker"]
+`
+    );
+
+    pipelineFolder.file(
+      'config.py',
+      `import os
+from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = Path(os.getenv("RAG_DATA_DIR", BASE_DIR / "data"))
+CHROMA_DIR = DATA_DIR / "chroma"
+
+LEGAL_DIR = DATA_DIR / "legal"
+COURT_DIR = DATA_DIR / "court"
+CARS_DIR = DATA_DIR / "cars"
+NEWS_DIR = DATA_DIR / "news"
+
+COLLECTION_LAWS = "legal_laws"
+COLLECTION_COURT = "court_cases"
+COLLECTION_CARS = "car_catalog"
+COLLECTION_NEWS = "auto_news"
+
+ALL_COLLECTIONS = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_CARS, COLLECTION_NEWS]
+
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemini-3.1-flash-lite-preview")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+
+TOP_K_RETRIEVAL = int(os.getenv("TOP_K_RETRIEVAL", "20"))
+TOP_K_RERANK = int(os.getenv("TOP_K_RERANK", "5"))
+
+PRIORITY_HIGH_BOOST = 1.35
+PRIORITY_MEDIUM_BOOST = 1.15
+`
+    );
+
+    pipelineFolder.file(
+      'chunker.py',
+      `import json, re
+from typing import Any, Dict, List, Tuple
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+from rag_pipeline.config import CARS_DIR, COURT_DIR, LEGAL_DIR, NEWS_DIR
+
+def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
+    paragraphs = [p.strip() for p in text.split("\\n\\n") if p.strip()]
+    chunks = []
+    for para in paragraphs:
+        if len(para) > max_chars:
+            sentences = re.split(r'(?<=[.!?])\\s+', para)
+            curr = ""
+            for s in sentences:
+                if len(curr) + len(s) < max_chars:
+                    curr = f"{curr} {s}".strip()
+                else:
+                    if len(curr) >= min_chars:
+                        chunks.append(curr)
+                    curr = s
+            if len(curr) >= min_chars:
+                chunks.append(curr)
+        elif len(para) >= min_chars:
+            chunks.append(para)
+    return chunks if chunks else [text[:max_chars]]
+
+class RAGChunker:
+    @staticmethod
+    def chunk_legal_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        child_chunks, parent_store = [], {}
+        if not LEGAL_DIR.exists():
+            return child_chunks, parent_store
+        for file_path in LEGAL_DIR.glob("*.md"):
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                meta, body = {}, content
+                if content.startswith("---"):
+                    parts = content.split("---", 2)
+                    if len(parts) >= 3:
+                        if yaml:
+                            meta = yaml.safe_load(parts[1]) or {}
+                        else:
+                            meta = {}
+                            for line in parts[1].split("\\n"):
+                                if ":" in line:
+                                    k, v = line.split(":", 1)
+                                    meta[k.strip()] = v.strip().strip('"').strip("'")
+                        body = parts[2].strip()
+                parent_id = f"law_{file_path.stem}"
+                title = meta.get("title", file_path.stem)
+                url = meta.get("original_url", "https://docs.cntd.ru")
+                details = meta.get("details", "")
+                priority = meta.get("priority_level", "standard")
+                category = meta.get("category", "Нормативная база")
+                parent_store[parent_id] = {
+                    "parent_id": parent_id, "title": title, "url": url,
+                    "details": details, "priority_level": priority, "category": category,
+                    "full_text": body
+                }
+                for idx, clause in enumerate(split_text_into_clauses(body, 450, 70)):
+                    child_chunks.append({
+                        "id": f"{parent_id}_c{idx}", "parent_id": parent_id,
+                        "text": f"{title}. {clause}",
+                        "metadata": {"parent_id": parent_id, "title": title, "url": url, "details": details, "priority_level": priority, "category": category, "doc_type": "legal_law", "chunk_index": idx}
+                    })
+            except Exception:
+                continue
+        return child_chunks, parent_store
+
+    @staticmethod
+    def chunk_court_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        child_chunks, parent_store = [], {}
+        court_file = COURT_DIR / "vsrf_court_docs_rag.json"
+        if not court_file.exists():
+            return child_chunks, parent_store
+        try:
+            cases = json.loads(court_file.read_text(encoding="utf-8"))
+            for idx, item in enumerate(cases):
+                meta = item.get("metadata", {})
+                content = item.get("page_content", "")
+                parent_id = f"court_{idx}"
+                title = meta.get("title", f"Дело ВС РФ #{idx}")
+                case_num = meta.get("case_number", "Не указан")
+                date = meta.get("date", "Не указана")
+                url = meta.get("url", "https://www.vsrf.ru")
+                parent_store[parent_id] = {"parent_id": parent_id, "title": title, "case_number": case_num, "date": date, "url": url, "full_text": content}
+                for c_idx, clause in enumerate(split_text_into_clauses(content, 450, 80)):
+                    child_chunks.append({
+                        "id": f"{parent_id}_c{c_idx}", "parent_id": parent_id,
+                        "text": f"Судебное дело ВС РФ {case_num} ({title}). {clause}",
+                        "metadata": {"parent_id": parent_id, "title": title, "case_number": case_num, "date": date, "url": url, "doc_type": "court_case", "priority_level": "high", "chunk_index": c_idx}
+                    })
+        except Exception:
+            pass
+        return child_chunks, parent_store
+
+    @staticmethod
+    def chunk_cars_catalog() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        child_chunks, parent_store = [], {}
+        cars_file = CARS_DIR / "cars_raskatof.json"
+        if not cars_file.exists():
+            return child_chunks, parent_store
+        try:
+            cars = json.loads(cars_file.read_text(encoding="utf-8"))
+            for idx, car in enumerate(cars):
+                parent_id = f"car_{idx}"
+                model = car.get("model", "Автомобиль")
+                category = car.get("category", "Автопарк")
+                specs = car.get("specifications", {})
+                terms = car.get("leasing_terms", {})
+                daily_rate = terms.get("daily_rate", "")
+                initial_pay = terms.get("initial_payment", "")
+                terms_text = terms.get("terms_text", "")
+                features = car.get("features", [])
+                url = "https://raskatof.ru/"
+                specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()])
+                feats_str = ", ".join(features)
+                full_card = f"Автомобиль: {model}\\nКатегория: {category}\\nХарактеристики: {specs_str}\\nОпции: {feats_str}\\nУсловия раската: {daily_rate}, {initial_pay}. {terms_text}"
+                parent_store[parent_id] = {"parent_id": parent_id, "title": model, "category": category, "daily_rate": daily_rate, "initial_payment": initial_pay, "url": url, "full_text": full_card}
+                child_chunks.append({
+                    "id": f"{parent_id}_overview", "parent_id": parent_id,
+                    "text": f"Автомобиль под раскат и выкуп {model}. Класс: {category}. Характеристики: {specs_str}. Условия: {daily_rate}, {initial_pay}.",
+                    "metadata": {"parent_id": parent_id, "title": model, "category": category, "daily_rate": daily_rate, "url": url, "doc_type": "car_overview", "priority_level": "high"}
+                })
+        except Exception:
+            pass
+        return child_chunks, parent_store
+
+    @staticmethod
+    def chunk_auto_news() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        child_chunks, parent_store = [], {}
+        news_file = NEWS_DIR / "latest_autonews.json"
+        if not news_file.exists():
+            return child_chunks, parent_store
+        try:
+            news = json.loads(news_file.read_text(encoding="utf-8"))
+            for idx, item in enumerate(news):
+                meta = item.get("metadata", {})
+                content = item.get("page_content", "")
+                parent_id = f"news_{idx}"
+                title = meta.get("title", f"Автоновость #{idx}")
+                url = meta.get("url", "")
+                date = meta.get("date", "")
+                parent_store[parent_id] = {"parent_id": parent_id, "title": title, "date": date, "url": url, "full_text": content}
+                for c_idx, clause in enumerate(split_text_into_clauses(content, 400, 70)):
+                    child_chunks.append({
+                        "id": f"{parent_id}_c{c_idx}", "parent_id": parent_id,
+                        "text": f"Новость рынка: {title}. {clause}",
+                        "metadata": {"parent_id": parent_id, "title": title, "date": date, "url": url, "doc_type": "news_article", "priority_level": "medium", "chunk_index": c_idx}
+                    })
+        except Exception:
+            pass
+        return child_chunks, parent_store
+`
+    );
+
+    pipelineFolder.file(
+      'indexer.py',
+      `import json, math, os, re
+from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from rag_pipeline.config import CHROMA_DIR, COLLECTION_CARS, COLLECTION_COURT, COLLECTION_LAWS, COLLECTION_NEWS
+from rag_pipeline.chunker import RAGChunker
+
+class SimpleBM25Index:
+    def __init__(self):
+        self.doc_ids: List[str] = []
+        self.corpus: List[List[str]] = []
+        self.doc_lens: List[int] = []
+        self.avgdl: float = 0.0
+        self.idf: Dict[str, float] = {}
+        self.k1 = 1.5
+        self.b = 0.75
+
+    def tokenize(self, text: str) -> List[str]:
+        return [w for w in re.findall(r'[\\w]+', text.lower()) if len(w) > 1]
+
+    def fit(self, doc_ids: List[str], texts: List[str]):
+        self.doc_ids = doc_ids
+        self.corpus = [self.tokenize(t) for t in texts]
+        self.doc_lens = [len(c) for c in self.corpus]
+        total_docs = len(texts)
+        if total_docs == 0:
+            return
+        self.avgdl = sum(self.doc_lens) / total_docs
+        df = {}
+        for doc in self.corpus:
+            for term in set(doc):
+                df[term] = df.get(term, 0) + 1
+        self.idf = {term: math.log((total_docs - freq + 0.5) / (freq + 0.5) + 1.0) for term, freq in df.items()}
+
+    def search(self, query: str, top_k: int = 15) -> List[Tuple[str, float]]:
+        q_tokens = self.tokenize(query)
+        scores = {}
+        for i, doc_tokens in enumerate(self.corpus):
+            doc_id = self.doc_ids[i]
+            d_len = self.doc_lens[i]
+            score = 0.0
+            tf_map = {}
+            for t in doc_tokens:
+                tf_map[t] = tf_map.get(t, 0) + 1
+            for q in q_tokens:
+                if q in tf_map:
+                    tf = tf_map[q]
+                    idf = self.idf.get(q, 0.1)
+                    denom = tf + self.k1 * (1 - self.b + self.b * (d_len / (self.avgdl or 1)))
+                    score += idf * (tf * (self.k1 + 1)) / (denom or 1)
+            if score > 0:
+                scores[doc_id] = score
+        sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted_docs[:top_k]
+
+class ChromaRAGIndexer:
+    def __init__(self):
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        self.parent_store_file = CHROMA_DIR / "parent_store.json"
+        self.bm25_indices_file = CHROMA_DIR / "bm25_indices.json"
+        self._init_chroma()
+
+    def _init_chroma(self):
+        self.client = None
+        self.chroma_available = False
+        try:
+            import chromadb
+            from chromadb.config import Settings
+            self.client = chromadb.PersistentClient(path=str(CHROMA_DIR), settings=Settings(anonymized_telemetry=False))
+            self.chroma_available = True
+        except Exception:
+            pass
+
+    def index_all(self) -> Dict[str, Any]:
+        combined_parent_store = {}
+        laws_chunks, laws_parents = RAGChunker.chunk_legal_docs()
+        court_chunks, court_parents = RAGChunker.chunk_court_docs()
+        cars_chunks, cars_parents = RAGChunker.chunk_cars_catalog()
+        news_chunks, news_parents = RAGChunker.chunk_auto_news()
+
+        for p_dict in [laws_parents, court_parents, cars_parents, news_parents]:
+            combined_parent_store.update(p_dict)
+        self.parent_store_file.write_text(json.dumps(combined_parent_store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        collection_map = {COLLECTION_LAWS: laws_chunks, COLLECTION_COURT: court_chunks, COLLECTION_CARS: cars_chunks, COLLECTION_NEWS: news_chunks}
+        bm25_dump = {}
+        for coll_name, chunks in collection_map.items():
+            ids = [c["id"] for c in chunks]
+            texts = [c["text"] for c in chunks]
+            bm25 = SimpleBM25Index()
+            bm25.fit(ids, texts)
+            bm25_dump[coll_name] = {"ids": ids, "texts": texts, "metas": [c["metadata"] for c in chunks]}
+            if self.chroma_available and self.client:
+                try:
+                    try:
+                        self.client.delete_collection(name=coll_name)
+                    except Exception:
+                        pass
+                    if ids:
+                        coll = self.client.create_collection(name=coll_name)
+                        coll.add(ids=ids, documents=texts, metadatas=[c["metadata"] for c in chunks])
+                except Exception:
+                    pass
+        self.bm25_indices_file.write_text(json.dumps(bm25_dump, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"total_chunks": sum(len(c) for c in collection_map.values()), "parent_docs_count": len(combined_parent_store), "collections": {k: len(v) for k, v in collection_map.items()}}
+`
+    );
+
+    pipelineFolder.file(
+      'retriever.py',
+      `import json, re
+from typing import Any, Dict, List, Optional
+from rag_pipeline.config import ALL_COLLECTIONS, CHROMA_DIR, COLLECTION_CARS, COLLECTION_COURT, COLLECTION_LAWS, COLLECTION_NEWS, PRIORITY_HIGH_BOOST, PRIORITY_MEDIUM_BOOST, TOP_K_RERANK, TOP_K_RETRIEVAL
+from rag_pipeline.indexer import ChromaRAGIndexer, SimpleBM25Index
+
+class QueryRouter:
+    @staticmethod
+    def route_query(query: str) -> List[str]:
+        q = query.lower()
+        targets = []
+        is_car = any(w in q for w in ["машин", "авто", "каталог", "chery", "haval", "geely", "лада", "granta", "аренд", "сутки", "взнос", "наличи", "выкуп", "раскат"])
+        is_law = any(w in q for w in ["гк", "нк", "стать", "закон", "налог", "ндс", "прибыль", "договор", "обязательств", "арендодател", "арендатор", "неустойк", "расторжен", "банкрот"])
+        is_court = any(w in q for w in ["суд", "верховн", "вс рф", "определен", "постановлен", "практик", "дело №", "спор", "взыскан", "изъяти"])
+        is_news = any(w in q for w in ["новост", "утильсбор", "рынок", "ставк", "индексац", "2024", "2025", "2026", "китайск"])
+        if is_car: targets.append(COLLECTION_CARS)
+        if is_law: targets.append(COLLECTION_LAWS)
+        if is_court: targets.append(COLLECTION_COURT)
+        if is_news: targets.append(COLLECTION_NEWS)
+        return targets if targets else ALL_COLLECTIONS
+
+class HybridRetriever:
+    def __init__(self):
+        self.indexer = ChromaRAGIndexer()
+        self.parent_store = self._load_parents()
+        self.bm25_indices, self.bm25_data = self._load_bm25()
+
+    def _load_parents(self) -> Dict[str, Any]:
+        f = CHROMA_DIR / "parent_store.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+    def _load_bm25(self):
+        f = CHROMA_DIR / "bm25_indices.json"
+        if not f.exists(): return {}, {}
+        data = json.loads(f.read_text(encoding="utf-8"))
+        indices = {}
+        for coll, cdata in data.items():
+            bm = SimpleBM25Index()
+            bm.fit(cdata.get("ids", []), cdata.get("texts", []))
+            indices[coll] = bm
+        return indices, data
+
+    def retrieve(self, query: str) -> Dict[str, Any]:
+        targets = QueryRouter.route_query(query)
+        candidates = []
+        for coll in targets:
+            bm25 = self.bm25_indices.get(coll)
+            cdata = self.bm25_data.get(coll, {})
+            id_to_meta = {cdata["ids"][i]: cdata["metas"][i] for i in range(len(cdata.get("ids", [])))}
+            id_to_text = {cdata["ids"][i]: cdata["texts"][i] for i in range(len(cdata.get("ids", [])))}
+            if bm25:
+                for chunk_id, bm_score in bm25.search(query, top_k=TOP_K_RETRIEVAL):
+                    meta = id_to_meta.get(chunk_id, {})
+                    text = id_to_text.get(chunk_id, "")
+                    boost = 1.0
+                    p_lvl = meta.get("priority_level", "standard")
+                    if p_lvl == "high": boost = PRIORITY_HIGH_BOOST
+                    elif p_lvl == "medium": boost = PRIORITY_MEDIUM_BOOST
+                    candidates.append({"id": chunk_id, "collection": coll, "score": bm_score * boost, "text": text, "metadata": meta})
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_candidates = candidates[:TOP_K_RERANK]
+        sources = []
+        context_blocks = []
+        for i, c in enumerate(top_candidates):
+            meta = c["metadata"]
+            parent_id = meta.get("parent_id", "")
+            parent = self.parent_store.get(parent_id, {})
+            title = parent.get("title", meta.get("title", "Документ"))
+            url = parent.get("url", meta.get("url", "https://docs.cntd.ru"))
+            full_text = parent.get("full_text", c["text"])
+            src = {"source_id": f"Источник #{i+1}", "collection": c["collection"], "title": title, "url": url, "matched_chunk": c["text"], "case_number": parent.get("case_number", meta.get("case_number")), "date": parent.get("date", meta.get("date")), "similarity_score": round(c["score"], 3)}
+            sources.append(src)
+            context_blocks.append(f"[{src['source_id']}] {title}\\nURL: {url}\\n{full_text[:1200]}")
+        return {"query": query, "target_collections": targets, "sources": sources, "formatted_context": "\\n\\n---\\n\\n".join(context_blocks)}
+`
+    );
+
+    pipelineFolder.file(
+      'generator.py',
+      `import json, os, logging
+from typing import Any, Dict, List
+from rag_pipeline.config import MODEL_NAME, GEMINI_API_KEY
+from rag_pipeline.retriever import HybridRetriever
+
+logger = logging.getLogger("rag_generator")
+
+SYSTEM_PROMPT = """Вы — ведущий юридический и коммерческий ИИ-консультант компании по раскату авто в РФ.
+Ваша задача: давать точные ответы на основе контекста со строгими Markdown-ссылками на первоисточники:
+- Для законов: [Название статьи ГК/НК РФ](URL)
+- Для судебных дел: [Определение ВС РФ № ДЕЛА от ДАТЫ](URL)
+- Для авто: [Модель авто](URL)
+"""
+
+class RAGAssistant:
+    def __init__(self):
+        self.retriever = HybridRetriever()
+        self.client = None
+        api_key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
+        if api_key:
+            try:
+                from google import genai
+                self.client = genai.Client(api_key=api_key)
+            except Exception:
+                pass
+
+    def answer_query(self, query: str) -> Dict[str, Any]:
+        retrieval_res = self.retriever.retrieve(query)
+        sources = retrieval_res["sources"]
+        context_text = retrieval_res["formatted_context"]
+        if not sources or not context_text.strip():
+            return {"query": query, "answer": "В базе знаний компании не найдено релевантных документов. Запустите: \`reindex_rag.bat\` или \`run_collectors.bat all\`.", "target_collections": retrieval_res.get("target_collections", []), "sources": []}
+        user_prompt = f"КОНТЕКСТ:\\n{context_text}\\n\\nВОПРОС: {query}\\nОтветьте с точными ссылками на первоисточники в Markdown."
+        answer_text = ""
+        if self.client:
+            try:
+                resp = self.client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={"system_instruction": SYSTEM_PROMPT, "temperature": 0.2})
+                answer_text = resp.text or ""
+            except Exception:
+                try:
+                    resp = self.client.models.generate_content(model="gemini-2.5-flash", contents=user_prompt, config={"system_instruction": SYSTEM_PROMPT, "temperature": 0.2})
+                    answer_text = resp.text or ""
+                except Exception:
+                    pass
+        if not answer_text:
+            parts = ["**Ответ RAG-ассистента по базе знаний компании:**\\n"]
+            for s in sources[:3]:
+                parts.append(f"- По данным **[{s['title']}]({s['url']})**: {s['matched_chunk'][:250]}...")
+            answer_text = "\\n".join(parts)
+        return {"query": query, "answer": answer_text, "target_collections": retrieval_res.get("target_collections", []), "sources": sources}
+`
+    );
   }
 
   // Seed data
