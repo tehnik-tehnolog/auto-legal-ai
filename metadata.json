@@ -1,0 +1,6 @@
+{
+  "name": "RAG Auto Raskat Collector",
+  "description": "Серверные скрипты сбора данных и расписание обновления для RAG-ассистента раската машин в РФ.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

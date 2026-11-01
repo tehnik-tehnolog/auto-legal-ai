@@ -1,0 +1,268 @@
+export interface RAGSource {
+  id: string;
+  number: number;
+  name: string;
+  section: string;
+  volume: string;
+  format: string;
+  schedule: string;
+  scheduleCron: string;
+  ragPurpose: string;
+  collectorName: string;
+  collectorFile: string;
+  status: 'ready' | 'active' | 'scheduled';
+  sampleFile: string;
+  sampleContent: string;
+  keyFields: string[];
+}
+
+export const RAG_SOURCES: RAGSource[] = [
+  {
+    id: 'gk',
+    number: 1,
+    name: 'Нормативная база (ГК РФ)',
+    section: 'Гражданский кодекс РФ',
+    volume: '~20 000 документов (статьи/пункты)',
+    format: '.md файлы с YAML-метаданными',
+    schedule: 'Раз в 3 месяца',
+    scheduleCron: '0 2 1 1,4,7,10 *',
+    ragPurpose: 'Базовые гражданско-правовые нормы договоров лизинга, аренды, залога и обязательств.',
+    collectorName: 'LawsCollector (ГК)',
+    collectorFile: 'collectors/gk_nk_laws.py',
+    status: 'ready',
+    sampleFile: 'data/legal/doc_665_leasing.md',
+    keyFields: ['source_site', 'category', 'original_url', 'title', 'details', 'priority_level'],
+    sampleContent: `---
+source_site: docs.cntd.ru
+category: Нормативная база (ГК РФ) / Лизинг
+original_url: https://docs.cntd.ru/document/9027703
+title: Статья 665. Договор финансовой аренды
+details: Гражданский кодекс РФ, Часть 2, Глава 34, Параграф 6
+priority_level: high
+collected_at: 2026-11-01 02:00:15
+---
+
+# Статья 665. Договор финансовой аренды
+
+**Реквизиты:** ГК РФ Часть вторая от 26.01.1996 N 14-ФЗ (ред. от 2026 г.)
+
+---
+
+По договору финансовой аренды (договору лизинга) арендодатель обязуется приобрести в собственность указанное арендатором имущество у определенного им продавца и предоставить арендатору это имущество за плату во временное владение и пользование.
+
+Арендодатель в этом случае не несет ответственности за выбор предмета аренды и продавца. Договором финансовой аренды может быть предусмотрено, что выбор продавца и приобретаемого имущества осуществляется арендодателем.`
+  },
+  {
+    id: 'nk',
+    number: 2,
+    name: 'Налоговая база (НК РФ)',
+    section: 'Налоговый кодекс РФ',
+    volume: 'Входит в общий массив законов',
+    format: '.md файлы с YAML-метаданными',
+    schedule: 'Раз в 3 месяца',
+    scheduleCron: '0 2 1 1,4,7,10 *',
+    ragPurpose: 'Расчет налоговой нагрузки, учет транспортных средств на балансе, лизинговые платежи, НДС, налог на прибыль.',
+    collectorName: 'LawsCollector (НК)',
+    collectorFile: 'collectors/gk_nk_laws.py',
+    status: 'ready',
+    sampleFile: 'data/legal/doc_264_tax_leasing.md',
+    keyFields: ['source_site', 'category', 'original_url', 'title', 'details', 'priority_level'],
+    sampleContent: `---
+source_site: docs.cntd.ru
+category: Налоговая база (НК РФ) / Налог на прибыль и амортизация
+original_url: https://docs.cntd.ru/document/901765862
+title: Статья 264. Прочие расходы, связанные с производством и реализацией
+details: Налоговый кодекс РФ, Часть 2, Глава 25
+priority_level: high
+collected_at: 2026-11-01 02:05:40
+---
+
+# Статья 264. Прочие расходы, связанные с производством и реализацией
+
+**Реквизиты:** НК РФ Часть вторая от 05.08.2000 N 117-ФЗ (ред. от 2026 г.)
+
+---
+
+К прочим расходам, связанным с производством и реализацией, относятся:
+подпункт 10 пункта 1: арендные (лизинговые) платежи за арендуемое (принятое в лизинг) имущество (в том числе земельные участки), а также расходы на приобретение имущества, переданного в лизинг.
+
+В случае, если в состав лизинговых платежей включена выкупная стоимость предмета лизинга, подлежащая уплате в счет выкупа имущества, такие платежи учитываются в составе расходов за вычетом указанной выкупной стоимости.`
+  },
+  {
+    id: 'vsrf',
+    number: 3,
+    name: 'Судебная практика ВС РФ',
+    section: 'Верховный Суд Российской Федерации',
+    volume: '56 документов (2021–2026 гг., «автомобиль»)',
+    format: 'vsrf_court_docs_rag.json (page_content + metadata)',
+    schedule: 'Раз в месяц',
+    scheduleCron: '0 3 1 * *',
+    ragPurpose: 'Анализ позиций Верховного Суда по спорам о защите прав потребителей, банкротстве и имуществу.',
+    collectorName: 'VSRFCourtCollector',
+    collectorFile: 'collectors/vsrf_court.py',
+    status: 'ready',
+    sampleFile: 'data/court/vsrf_court_docs_rag.json',
+    keyFields: ['page_content', 'metadata.case_number', 'metadata.date', 'metadata.url', 'metadata.doc_type'],
+    sampleContent: `[
+  {
+    "page_content": "Заголовок: Определение Судебной коллегии по гражданским делам ВС РФ № 5-КГ23-104-К2\\nНомер дела: 5-КГ23-104-К2\\nДата: 14.11.2023\\nТекст постановления:\\nСудебная коллегия по гражданским делам Верховного Суда Российской Федерации рассмотрела кассационную жалобу по спору о расторжении договора аренды транспортного средства с правом выкупа... Коллегия указала: при систематическом нарушении графика внесения арендных платежей арендодатель вправе истребовать предмет лизинга (автомобиль) из незаконного владения, при этом сальдо взаимных обязательств подлежит расчету с учетом амортизации и фактического износа транспортного средства.",
+    "metadata": {
+      "title": "Определение Судебной коллегии по гражданским делам ВС РФ № 5-КГ23-104-К2",
+      "case_number": "5-КГ23-104-К2",
+      "date": "14.11.2023",
+      "url": "https://www.vsrf.ru/media-proxy/?id=228419",
+      "source": "vsrf.ru",
+      "doc_type": "court_decision",
+      "category": "Судебная практика ВС РФ (автомобили/лизинг)",
+      "char_length": 18450,
+      "collected_at": "2026-11-01 03:15:22"
+    }
+  }
+]`
+  },
+  {
+    id: 'cars',
+    number: 4,
+    name: 'Ассортимент машин',
+    section: 'Каталог raskatof.ru',
+    volume: 'Актуальный автопарк в наличии',
+    format: 'Структурированные карточки (cars_raskatof.json + RAG)',
+    schedule: 'Раз в неделю',
+    scheduleCron: '0 4 * * 1',
+    ragPurpose: 'Актуальный каталог доступных для аренды/выкупа автомобилей, комплектации, цены и условия.',
+    collectorName: 'CarsCollector',
+    collectorFile: 'collectors/raskatof_cars.py',
+    status: 'ready',
+    sampleFile: 'data/cars/cars_raskatof.json',
+    keyFields: ['category', 'model', 'specifications', 'features', 'leasing_terms', 'page_content'],
+    sampleContent: `[
+  {
+    "category": "Эконом и комфорт класс",
+    "model": "Chery Tiggo 4 Pro (1.5 CVT)",
+    "specifications": {
+      "Год выпуска": "2023",
+      "Мощность": "113 л.с.",
+      "Коробка передач": "Вариатор (CVT)",
+      "Топливо": "Бензин (АИ-92)"
+    },
+    "features": [
+      "Камера заднего вида и парктроники",
+      "Круиз-контроль",
+      "Обогрев передних сидений и руля",
+      "Мультимедиа 10.25 дюйма с Apple CarPlay / Android Auto"
+    ],
+    "leasing_terms": {
+      "daily_rate": "Аренда от 2 400 ₽ / сутки",
+      "initial_payment": "Первоначальный взнос 15 000 ₽"
+    },
+    "source_url": "https://raskatof.ru/",
+    "updated_at": "2026-11-01 04:00:32"
+  }
+]`
+  },
+  {
+    id: 'news',
+    number: 5,
+    name: 'Автомобильные новости',
+    section: 'Отраслевые автоновости и регуляторика',
+    volume: '50 коротких статей / дайджестов',
+    format: 'Текстовые статьи с датами (latest_autonews.json)',
+    schedule: 'Раз в неделю',
+    scheduleCron: '0 5 * * 1',
+    ragPurpose: 'Мониторинг изменений рынка, цен на авто и законодательных инициатив в сфере транспорта.',
+    collectorName: 'AutoNewsCollector',
+    collectorFile: 'collectors/auto_news.py',
+    status: 'ready',
+    sampleFile: 'data/news/latest_autonews.json',
+    keyFields: ['page_content', 'metadata.title', 'metadata.url', 'metadata.date', 'metadata.source'],
+    sampleContent: `[
+  {
+    "page_content": "Заголовок: Индексация утилизационного сбора и ее влияние на лизинг коммерческих и легковых авто\\nСодержание: Правительство РФ утвердило шкалу плановой индексации утильсбора до 2030 года. Для парков раската и лизинговых компаний повышение ставок означает рост первоначальной стоимости приобретаемых транспортных средств в среднем на 12-18% в зависимости от объема двигателя. Эксперты отмечают смещение спроса в сторону локализованных брендов и автомобилей с пробегом до 3 лет.",
+    "metadata": {
+      "title": "Индексация утилизационного сбора и ее влияние на лизинг",
+      "url": "https://autonews.ru/news/util-sbor-leasing-impact-2026",
+      "date": "2026-10-28T14:20:00Z",
+      "source": "autonews.ru",
+      "matched_query": "утильсбор",
+      "is_full_text": true,
+      "collected_at": "2026-11-01 05:01:10"
+    }
+  }
+]`
+  }
+];
+
+export const SERVER_SCRIPTS = [
+  {
+    path: 'streamlit_app.py',
+    name: 'streamlit_app.py',
+    badge: 'Streamlit Web UI',
+    description: 'Интерфейс веб-приложения на Streamlit: RAG-чат, каталог авто, база законов и судебной практики'
+  },
+  {
+    path: 'run_streamlit.bat',
+    name: 'run_streamlit.bat',
+    badge: 'Windows Bat',
+    description: 'Запуск веб-приложения Streamlit на Windows 10 одним кликом'
+  },
+  {
+    path: 'run_collectors.bat',
+    name: 'run_collectors.bat',
+    badge: 'Windows Bat',
+    description: 'Запуск сбора данных на Windows 10 через виртуальное окружение PyCharm / venv'
+  },
+  {
+    path: 'setup_windows_scheduler.bat',
+    name: 'setup_windows_scheduler.bat',
+    badge: 'Task Scheduler',
+    description: 'Автоматическое добавление 4 заданий сбора данных в Планировщик заданий Windows 10'
+  },
+  {
+    path: 'runner.py',
+    name: 'runner.py',
+    badge: 'CLI Entrypoint',
+    description: 'Мастер-скрипт оркестрации с поддержкой Windows 10 Proactor asyncio, cron и проверки базы'
+  },
+  {
+    path: 'collectors/gk_nk_laws.py',
+    name: 'collectors/gk_nk_laws.py',
+    badge: 'ГК РФ / НК РФ',
+    description: 'Сбор нормативно-правовых актов с docs.cntd.ru без таймаутов, с YAML frontmatter и priority_level'
+  },
+  {
+    path: 'collectors/vsrf_court.py',
+    name: 'collectors/vsrf_court.py',
+    badge: 'ВС РФ (PDF)',
+    description: 'Headless сбор определений ВС РФ по автоспорам с извлечением текста из PDF и дедупликацией'
+  },
+  {
+    path: 'collectors/raskatof_cars.py',
+    name: 'collectors/raskatof_cars.py',
+    badge: 'raskatof.ru',
+    description: 'Сбор каталога авто, условий раската/выкупа и формирование RAG-чанков'
+  },
+  {
+    path: 'collectors/auto_news.py',
+    name: 'collectors/auto_news.py',
+    badge: 'Новости авторынка',
+    description: 'Сбор новостей по утильсбору, лизингу и ОСАГО через NewsData API с RSS-фоллбэком'
+  },
+  {
+    path: 'config/settings.py',
+    name: 'config/settings.py',
+    badge: 'Настройки',
+    description: 'Централизованная конфигурация путей, тайм-аутов, URL и API-ключей'
+  },
+  {
+    path: 'requirements.txt',
+    name: 'requirements.txt',
+    badge: 'Зависимости',
+    description: 'Пакеты: streamlit, pandas, playwright, requests, beautifulsoup4, pypdf, pyyaml'
+  },
+  {
+    path: 'Dockerfile',
+    name: 'Dockerfile',
+    badge: 'Docker',
+    description: 'Контейнер со всеми системными библиотеками Chromium для headless запуска в Docker Desktop / WSL2'
+  }
+];

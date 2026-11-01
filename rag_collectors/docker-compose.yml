@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  rag-collector:
+    build: .
+    container_name: rag-auto-collector
+    restart: unless-stopped
+    environment:
+      - RAG_DATA_DIR=/app/data
+      - HTTP_TIMEOUT=30
+      - NEWSDATA_API_KEY=${NEWSDATA_API_KEY:-pub_f09cd847b3d74c7492d4dcec897dedb6}
+      - CNTD_MAX_DOCS=1000
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    # Для разового запуска конкретного коллектора:
+    # docker compose run --rm rag-collector python runner.py --collector cars
