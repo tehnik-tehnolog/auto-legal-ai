@@ -8,7 +8,7 @@
       "source": "fedpress_ru",
       "matched_query": "\"вторичный рынок\"",
       "is_full_text": true,
-      "collected_at": "2026-11-01 23:32:54"
+      "collected_at": "2026-11-02 01:33:12"
     }
   },
   {
@@ -20,7 +20,7 @@
       "source": "konkurent_ru",
       "matched_query": "\"авто с пробегом\"",
       "is_full_text": true,
-      "collected_at": "2026-11-01 23:32:55"
+      "collected_at": "2026-11-02 01:33:13"
     }
   },
   {
@@ -32,19 +32,7 @@
       "source": "ura_news",
       "matched_query": "\"автокредит\"",
       "is_full_text": true,
-      "collected_at": "2026-11-01 23:32:55"
-    }
-  },
-  {
-    "page_content": "Заголовок: Юрист рассказал, кто может претендовать на льготный автокредит\nСодержание: МОСКВА, 31 окт — РИА Новости. Купить автомобиль по программе льготного кредитования в 2026 году смогут медицинские работники, педагоги, граждане с инвалидностью, семьи с двумя и более детьми, а также участники СВО и члены их семей, рассказал РИА Новости старший управляющий партнер юридической компании PG Partners Петр Гусятников. В конце сентября Минпромторг России сообщил о досрочном освоении бюджетных средств, заложенных в 2026 году на программы льготного автокредитования и лизинга, в связи с чем действие этих программ было приостановлено. Позднее в октябре первый вице-премьер РФ Денис Мантуров анонсировал возобновление действия программ поддержки спроса с 1 декабря за счет лимитов 2027 года. «В 2026 году государственная программа льготного автокредитования предусматривает скидки на приобретение транспортных средств в различных категориях. На автомобили с двигателем внутреннего сгорания (ДВС) дисконт для медицинских работников, педагогов, граждан с инвалидностью, участников СВО и членов их семей составляет 20%», — пояснил Гусятников. Он отметил также, что для жителей Дальнего Востока скидка будет больше — 25%, а семьи с двумя и более несовершеннолетними детьми могут приобрести машину на 10% дешевле по программе «Семейный автомобиль». Кроме того, для участников СВО, получивших ранения, при покупке автомобиля с ручным управлением предоставляется скидка в размере 40%. При этом отечественный электромобиль со скидкой 35% от стоимости, но не более 925 тысяч рублей может купить любой желающий, ограничений для этого вида автомобилей нет, уточнил эксперт.",
-    "metadata": {
-      "title": "Юрист рассказал, кто может претендовать на льготный автокредит",
-      "url": "https://news.mail.ru/politics/72924435/",
-      "date": "2026-10-30 21:49:13",
-      "source": "news_mail",
-      "matched_query": "\"автокредит\"",
-      "is_full_text": true,
-      "collected_at": "2026-11-01 23:32:57"
+      "collected_at": "2026-11-02 01:33:13"
     }
   },
   {
@@ -56,7 +44,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:32:59"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -68,7 +56,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:32:59"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -80,7 +68,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:32:59"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -92,7 +80,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:32:59"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -104,7 +92,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:00"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -116,7 +104,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:00"
+      "collected_at": "2026-11-02 01:33:15"
     }
   },
   {
@@ -128,7 +116,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:00"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -140,7 +128,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:00"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -152,7 +140,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:00"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -164,7 +152,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -176,7 +164,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -188,7 +176,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -200,7 +188,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -212,7 +200,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:16"
     }
   },
   {
@@ -224,7 +212,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:01"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -236,7 +224,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -248,7 +236,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -260,7 +248,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -272,7 +260,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -284,7 +272,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -296,7 +284,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:02"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -308,7 +296,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:17"
     }
   },
   {
@@ -320,7 +308,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -332,7 +320,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -344,7 +332,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -356,7 +344,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -368,7 +356,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -380,7 +368,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:03"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -392,7 +380,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -404,7 +392,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:18"
     }
   },
   {
@@ -416,7 +404,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -428,7 +416,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -440,7 +428,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -452,7 +440,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:04"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -464,7 +452,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -476,7 +464,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -488,7 +476,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -500,7 +488,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:19"
     }
   },
   {
@@ -512,7 +500,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -524,7 +512,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:05"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -536,7 +524,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -548,7 +536,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -560,7 +548,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -572,7 +560,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -584,7 +572,7 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
     }
   },
   {
@@ -596,7 +584,19 @@
       "source": "rss_feed",
       "matched_query": "auto_rss",
       "is_full_text": false,
-      "collected_at": "2026-11-01 23:33:06"
+      "collected_at": "2026-11-02 01:33:20"
+    }
+  },
+  {
+    "page_content": "Заголовок: Китайцы выпустили самый мощный в мире гусеничный трактор отдачей 1600 сил\nСодержание: Китайская компания Zoomlion представила на&nbsp;выставке China International Agricultural Machinery Exhibition 2026 гибридный трактор 9DX пиковой мощностью 1600 л. с., который стал новым мировым рекордом в&nbsp;сельскохозяйственном машиностроении.",
+    "metadata": {
+      "title": "Китайцы выпустили самый мощный в мире гусеничный трактор отдачей 1600 сил",
+      "url": "https://motor.ru/news/kitaicy-vypustili-samyi-moshnyi-v-mire-gusenichnyi-traktor-otdachei-1600-sil-28-10-2026.htm",
+      "date": "Wed, 28 Oct 2026 19:34:01 +0300",
+      "source": "rss_feed",
+      "matched_query": "auto_rss",
+      "is_full_text": false,
+      "collected_at": "2026-11-02 01:33:21"
     }
   }
 ]

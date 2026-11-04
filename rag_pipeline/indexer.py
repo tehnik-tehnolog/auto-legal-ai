@@ -1,9 +1,15 @@
 """
 Индексатор ChromaDB с поддержкой раздельных коллекций и хранилища родительских документов.
+Обеспечивает детальный консольный вывод процесса индексации для PyCharm и логирование.
 """
 
 import json
 import logging
+import math
+import os
+import re
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,11 +20,20 @@ from rag_pipeline.config import (
     COLLECTION_COURT,
     COLLECTION_LAWS,
     COLLECTION_NEWS,
+    EMBEDDING_MODEL,
+    LEGAL_JSONL_FILE,
+    LOGS_DIR,
+    MODEL_NAME,
 )
 from rag_pipeline.chunker import RAGChunker
 
 logger = logging.getLogger("rag_indexer")
 logger.setLevel(logging.INFO)
+
+INDEXER_LOG_FILE = LOGS_DIR / "rag_indexer.log"
+_ifh = logging.FileHandler(INDEXER_LOG_FILE, encoding="utf-8")
+_ifh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
+logger.addHandler(_ifh)
 
 
 class SimpleBM25Index:
@@ -35,12 +50,10 @@ class SimpleBM25Index:
         self.idf: Dict[str, float] = {}
 
     def tokenize(self, text: str) -> List[str]:
-        import re
         tokens = re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', text.lower())
         return tokens
 
     def build(self, chunks: List[Dict[str, Any]]):
-        import math
         self.doc_ids = []
         self.corpus = []
         self.docs_map = {}
@@ -90,7 +103,7 @@ class SimpleBM25Index:
 
 
 class ChromaRAGIndexer:
-    """Управление 4 коллекциями ChromaDB и родительским хранилищем"""
+    """Управление 4 коллекциями ChromaDB и родительским хранилищем с детальным логированием"""
 
     def __init__(self):
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
@@ -108,8 +121,8 @@ class ChromaRAGIndexer:
                 path=str(CHROMA_DIR),
                 settings=Settings(anonymized_telemetry=False, is_persistent=True)
             )
+            logger.info("ChromaDB PersistentClient успешно инициализирован.")
         except Exception as e:
-            # Если chromadb не установлен в текущем окружении, используем локальный JSON-fall-back
             logger.warning(f"ChromaDB клиент не инициализирован ({e}). Будет использован локальный индекс.")
             self.client = None
 
@@ -126,50 +139,142 @@ class ChromaRAGIndexer:
         with open(self.parent_store_path, "w", encoding="utf-8") as f:
             json.dump(self.parent_store, f, ensure_ascii=False, indent=2)
 
-    def index_all(self) -> Dict[str, Any]:
+    def index_all(self, verbose: bool = True) -> Dict[str, Any]:
         """
         Индексация всех 4 источников:
-        1. Законы ГК/НК РФ
-        2. Судебная практика ВС РФ
-        3. Ассортимент raskatof.ru
-        4. Автоновости
+        1. Законы ГК/НК РФ (из единого JSONL файла)
+        2. Судебная практика ВС РФ (из vsrf_court_docs_rag.json)
+        3. Ассортимент raskatof.ru (из cars_raskatof.json)
+        4. Автоновости (из latest_autonews.json)
         """
+        t_start = time.time()
+
+        if verbose:
+            print("=" * 76)
+            print("🚀 RAG CHROMA ИНДЕКСАЦИЯ БАЗЫ ЗНАНИЙ (РАСКАТ АВТО РФ)")
+            print("=" * 76)
+            print(f"  • Время запуска:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  • Папка ChromaDB:      {CHROMA_DIR}")
+            print(f"  • Модель генерации:    {MODEL_NAME}")
+            print(f"  • Модель эмбеддингов:  {EMBEDDING_MODEL}")
+            print(f"  • Единый файл законов: {LEGAL_JSONL_FILE}")
+            print("=" * 76)
+
         stats = {
             "total_chunks": 0,
             "collections": {},
-            "parent_docs_count": 0
+            "parent_docs_count": 0,
+            "duration_sec": 0.0,
+            "breakdown": {}
         }
 
-        # 1. Извлечение чанков
-        laws_chunks, laws_parents = RAGChunker.chunk_legal_docs()
-        court_chunks, court_parents = RAGChunker.chunk_court_docs()
-        cars_chunks, cars_parents = RAGChunker.chunk_cars_catalog()
-        news_chunks, news_parents = RAGChunker.chunk_news_docs()
+        # -------------------------------------------------------------
+        # ШАГ 1: Загрузка и Parent-Document чанкинг
+        # -------------------------------------------------------------
+        if verbose:
+            print("\n[ШАГ 1/4] ИЗВЛЕЧЕНИЕ ДОКУМЕНТОВ И ИЕРАРХИЧЕСКИЙ ЧАНКИНГ (Small-to-Big)")
+            print("-" * 76)
 
-        # Сохранение объединенного хранилища Parent-документов
+        # 1.1 Нормативная база
+        t0 = time.time()
+        laws_chunks, laws_parents = RAGChunker.chunk_legal_docs()
+        t_laws = time.time() - t0
+
+        tax_count = sum(1 for p in laws_parents.values() if p.get("section") == "НК РФ" or p.get("parent_id", "").startswith("tax_"))
+        civics_count = sum(1 for p in laws_parents.values() if p.get("section") == "ГК РФ" or p.get("parent_id", "").startswith("civics_"))
+        categories = list(set(p.get("category", "Не указана") for p in laws_parents.values()))
+
+        if verbose:
+            source_type = "JSONL (laws_gk_nk.jsonl)" if LEGAL_JSONL_FILE.exists() else ".md файлов"
+            print(f"  📜 [1] Нормативная база ({source_type}):")
+            print(f"     • Найдено документов:  {len(laws_parents)} шт. (НК РФ: {tax_count}, ГК РФ: {civics_count})")
+            print(f"     • Категории в базе:    {', '.join(categories[:4])}{'...' if len(categories) > 4 else ''}")
+            print(f"     • Сгенерировано чанков:{len(laws_chunks)} атомных пунктов (время: {t_laws:.2f} с)")
+
+        # 1.2 Судебная практика ВС РФ
+        t0 = time.time()
+        court_chunks, court_parents = RAGChunker.chunk_court_docs()
+        t_court = time.time() - t0
+        if verbose:
+            print(f"  ⚖️  [2] Судебная практика Верховного Суда РФ:")
+            print(f"     • Актов ВС в базе:     {len(court_parents)} шт.")
+            print(f"     • Сгенерировано чанков:{len(court_chunks)} пунктов аргументации (время: {t_court:.2f} с)")
+
+        # 1.3 Каталог автомобилей
+        t0 = time.time()
+        cars_chunks, cars_parents = RAGChunker.chunk_cars_catalog()
+        t_cars = time.time() - t0
+        if verbose:
+            print(f"  🚗 [3] Автопарк raskatof.ru:")
+            print(f"     • Моделей авто:        {len(cars_parents)} шт.")
+            print(f"     • Сгенерировано чанков:{len(cars_chunks)} карточек (время: {t_cars:.2f} с)")
+
+        # 1.4 Автоновости
+        t0 = time.time()
+        news_chunks, news_parents = RAGChunker.chunk_auto_news()
+        t_news = time.time() - t0
+        if verbose:
+            print(f"  📰 [4] Автоновости и рынок:")
+            print(f"     • Новостных статей:    {len(news_parents)} шт.")
+            print(f"     • Сгенерировано чанков:{len(news_chunks)} фрагментов (время: {t_news:.2f} с)")
+
+        # -------------------------------------------------------------
+        # ШАГ 2: Сохранение объединенного хранилища Parent-документов
+        # -------------------------------------------------------------
+        if verbose:
+            print("\n[ШАГ 2/4] СОХРАНЕНИЕ ХРАНИЛИЩА РОДИТЕЛЬСКИХ ДОКУМЕНТОВ (ParentStore)")
+            print("-" * 76)
+
+        self.parent_store.clear()
         self.parent_store.update(laws_parents)
         self.parent_store.update(court_parents)
         self.parent_store.update(cars_parents)
         self.parent_store.update(news_parents)
         self.save_parent_store()
+
+        store_size_kb = round(self.parent_store_path.stat().st_size / 1024, 1) if self.parent_store_path.exists() else 0
         stats["parent_docs_count"] = len(self.parent_store)
 
+        if verbose:
+            print(f"  💾 Файл: {self.parent_store_path}")
+            print(f"     • Всего родительских документов: {len(self.parent_store)} шт.")
+            print(f"     • Размер на диске:               {store_size_kb} КБ")
+
+        # -------------------------------------------------------------
+        # ШАГ 3: Запись в 4 раздельные коллекции ChromaDB
+        # -------------------------------------------------------------
+        if verbose:
+            print("\n[ШАГ 3/4] ЗАПИСЬ В 4 РАЗДЕЛЬНЫЕ КОЛЛЕКЦИИ CHROMADB")
+            print("-" * 76)
+
         collection_data = [
-            (COLLECTION_LAWS, laws_chunks),
-            (COLLECTION_COURT, court_chunks),
-            (COLLECTION_CARS, cars_chunks),
-            (COLLECTION_NEWS, news_chunks)
+            (COLLECTION_LAWS, laws_chunks, "Нормативная база (ГК/НК РФ)"),
+            (COLLECTION_COURT, court_chunks, "Судебная практика ВС РФ"),
+            (COLLECTION_CARS, cars_chunks, "Каталог авто raskatof.ru"),
+            (COLLECTION_NEWS, news_chunks, "Автоновости и рынок")
         ]
 
-        # Индексация в ChromaDB
-        for coll_name, chunks in collection_data:
+        chroma_active = bool(self.client is not None)
+        if verbose:
+            mode_str = "PersistentClient (нативно на диске)" if chroma_active else "Локальный JSON-индекс (модуль chromadb не найден)"
+            print(f"  Режим ChromaDB: {mode_str}")
+
+        bm25_indices_dump = {}
+
+        for coll_name, chunks, label in collection_data:
+            c_len = len(chunks)
+            if verbose:
+                print(f"  • Коллекция [{coll_name}] ({label}):")
+
             if not chunks:
+                if verbose:
+                    print(f"    - Пропущено (0 чанков)")
                 stats["collections"][coll_name] = 0
                 continue
 
+            # Добавляем в ChromaDB при наличии клиента
             if self.client:
                 try:
-                    # Пересоздаем коллекцию
                     try:
                         self.client.delete_collection(coll_name)
                     except Exception:
@@ -180,27 +285,84 @@ class ChromaRAGIndexer:
                         metadata={"hnsw:space": "cosine"}
                     )
 
-                    # Добавляем пачками
                     ids = [c["id"] for c in chunks]
                     docs = [c["text"] for c in chunks]
                     metas = [c["metadata"] for c in chunks]
 
                     batch_size = 100
-                    for b_start in range(0, len(chunks), batch_size):
+                    total_batches = (c_len + batch_size - 1) // batch_size
+                    for b_idx in range(total_batches):
+                        start = b_idx * batch_size
+                        end = min(start + batch_size, c_len)
                         coll.add(
-                            ids=ids[b_start:b_start + batch_size],
-                            documents=docs[b_start:b_start + batch_size],
-                            metadatas=metas[b_start:b_start + batch_size]
+                            ids=ids[start:end],
+                            documents=docs[start:end],
+                            metadatas=metas[start:end]
                         )
+                        if verbose:
+                            pct = int((end / c_len) * 100)
+                            bar = "#" * (pct // 5) + "-" * (20 - (pct // 5))
+                            print(f"    - Добавлено в векторный индекс: [{bar}] {pct}% ({end}/{c_len} чанков)", end="\r")
+                    if verbose:
+                        print()
                 except Exception as ex:
                     logger.warning(f"Ошибка записи в ChromaDB ({coll_name}): {ex}")
+                    if verbose:
+                        print(f"    - Ошибка ChromaDB: {ex}")
 
-            # Сохранение резервной копии чанков в JSON для BM25 поиска
+            # Подготовка данных для BM25
+            bm25 = SimpleBM25Index()
+            bm25.build(chunks)
+            bm25_indices_dump[coll_name] = {
+                "ids": [c["id"] for c in chunks],
+                "texts": [c["text"] for c in chunks],
+                "metas": [c["metadata"] for c in chunks],
+                "avgdl": round(bm25.avgdl, 2),
+                "vocab_size": len(bm25.doc_freqs)
+            }
+
+            # Сохранение резервного JSON с чанками
             chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
             with open(chunk_backup_file, "w", encoding="utf-8") as f:
                 json.dump(chunks, f, ensure_ascii=False, indent=2)
 
-            stats["collections"][coll_name] = len(chunks)
-            stats["total_chunks"] += len(chunks)
+            stats["collections"][coll_name] = c_len
+            stats["total_chunks"] += c_len
 
+            if verbose:
+                print(f"    - Готово: {c_len} чанков проиндексировано. Словарь BM25: {len(bm25.doc_freqs)} слов.")
+
+        # -------------------------------------------------------------
+        # ШАГ 4: Сохранение BM25 поисковых индексов
+        # -------------------------------------------------------------
+        if verbose:
+            print("\n[ШАГ 4/4] СОХРАНЕНИЕ ЛЕКСИЧЕСКИХ ИНДЕКСОВ BM25")
+            print("-" * 76)
+
+        with open(self.bm25_store_path, "w", encoding="utf-8") as f:
+            json.dump(bm25_indices_dump, f, ensure_ascii=False, indent=2)
+
+        bm25_size_kb = round(self.bm25_store_path.stat().st_size / 1024, 1) if self.bm25_store_path.exists() else 0
+        if verbose:
+            print(f"  💾 Файл: {self.bm25_store_path} (Размер: {bm25_size_kb} КБ)")
+
+        # Завершение
+        t_total = round(time.time() - t_start, 2)
+        stats["duration_sec"] = t_total
+
+        if verbose:
+            print("\n" + "=" * 76)
+            print("✅ ИНДЕКСАЦИЯ БАЗЫ ДАННЫХ RAG УСПЕШНО ЗАВЕРШЕНА!")
+            print("=" * 76)
+            print(f"  {'Коллекция':<22} | {'Чанков':<10} | {'Статус':<15}")
+            print("  " + "-" * 55)
+            for coll, count in stats["collections"].items():
+                print(f"  {coll:<22} | {count:<10} | {'OK Готово':<15}")
+            print("  " + "-" * 55)
+            print(f"  Всего поисковых чанков:   {stats['total_chunks']}")
+            print(f"  Родительских документов: {stats['parent_docs_count']}")
+            print(f"  ⏱ Общее время работы:    {t_total} сек")
+            print("=" * 76)
+
+        logger.info(f"Индексация завершена: {stats['total_chunks']} чанков, {stats['parent_docs_count']} документов за {t_total} сек.")
         return stats

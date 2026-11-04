@@ -26,11 +26,31 @@ def print_status_dashboard():
     print("=" * 70)
 
     # 1. Законы (ГК РФ / НК РФ)
-    law_files = list(LEGAL_DIR.glob("*.md"))
-    law_size_kb = sum(f.stat().st_size for f in law_files) / 1024 if law_files else 0
+    jsonl_file = LEGAL_DIR / "laws_gk_nk.jsonl"
+    jsonl_count = 0
+    tax_count = 0
+    civics_count = 0
+    if jsonl_file.exists():
+        try:
+            with open(jsonl_file, "r", encoding="utf-8") as jf:
+                for line in jf:
+                    if line.strip():
+                        jsonl_count += 1
+                        try:
+                            d = json.loads(line)
+                            if d.get("section") == "НК РФ" or d.get("parent_id", "").startswith("tax_"):
+                                tax_count += 1
+                            elif d.get("section") == "ГК РФ" or d.get("parent_id", "").startswith("civics_"):
+                                civics_count += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    jsonl_size_kb = jsonl_file.stat().st_size / 1024 if jsonl_file.exists() else 0
     print(f"1. 📜 Нормативная база (ГК/НК РФ):")
-    print(f"   - Документов (.md): {len(law_files)}")
-    print(f"   - Общий объем:      {law_size_kb:.1f} КБ")
+    print(f"   - Единый файл:      laws_gk_nk.jsonl ({jsonl_size_kb:.1f} КБ)")
+    print(f"   - Документов всего: {jsonl_count} (НК РФ: {tax_count}, ГК РФ: {civics_count})")
     print(f"   - Директория:       {LEGAL_DIR}")
     print(f"   - Регламент:        Раз в 3 месяца")
 

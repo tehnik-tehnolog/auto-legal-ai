@@ -439,12 +439,33 @@ CARS_DIR = DATA_DIR / "cars"
 NEWS_DIR = DATA_DIR / "news"
 LOGS_DIR = BASE_DIR / "logs"
 
+LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
+
 for d in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "30"))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "pub_f09cd847b3d74c7492d4dcec897dedb6")
+
+CNTD_TAX_THEMES = {
+    "Налог на добавленную стоимость": "https://docs.cntd.ru/federal?theme=746501331",
+    "Налог на прибыль организаций": "https://docs.cntd.ru/federal?theme=746501333",
+    "Налог на имущество организаций": "https://docs.cntd.ru/federal?theme=746501334",
+    "Транспортный налог": "https://docs.cntd.ru/federal?theme=746501351",
+    "Страховые взносы на обязательное пенсионное страхование": "https://docs.cntd.ru/federal?theme=746501350",
+    "Страховые взносы в ФСС РФ на обязательное социальное страхование": "https://docs.cntd.ru/federal?theme=746501356",
+    "Страховые взносы на обязательное медицинское страхование": "https://docs.cntd.ru/federal?theme=746501357",
+    "Упрощенная система налогообложения": "https://docs.cntd.ru/federal?theme=746501361",
+}
+
+CNTD_CIVICS_THEMES = {
+    "Собственность, приватизация, арендные отношения": "https://docs.cntd.ru/federal?theme=746501320",
+    "Предприятия и предпринимательская деятельность": "https://docs.cntd.ru/federal?theme=746501321",
+    "Страхование и страховая деятельность": "https://docs.cntd.ru/federal?theme=746501339",
+    "Несостоятельность (банкротство)": "https://docs.cntd.ru/federal?theme=746501362",
+}
+
 CNTD_THEME_URL = "https://docs.cntd.ru/federal?theme=746501321"
 CNTD_MAX_DOCS = 1000
 VSRF_URL = "https://www.vsrf.ru/documents"
@@ -1021,7 +1042,14 @@ class RAGAssistant:
     ], null, 2));
 
     const legalFolder = dataFolder.folder('legal');
-    legalFolder?.file('doc_665_leasing.md', `---\nsource_site: docs.cntd.ru\ncategory: Нормативная база (ГК РФ) / Лизинг\ntitle: Статья 665. Договор финансовой аренды\npriority_level: high\n---\n\n# Статья 665. Договор финансовой аренды\n\nПо договору финансовой аренды арендодатель обязуется приобрести имущество...`);
+    legalFolder?.file(
+      'laws_gk_nk.jsonl',
+      `{"parent_id": "tax_1300338665", "source_site": "docs.cntd.ru", "section": "НК РФ", "category": "Транспортный_налог", "original_url": "https://docs.cntd.ru/document/1300338665", "title": "Об утверждении Порядка списания задолженности, признанной безнадежной к взысканию", "details": "Приказ ФНС России от 30 ноября 2022 г. № ЕД-7-8/1131@", "collected_at": "2026-11-01 23:39:50", "priority_level": "high", "body": "Порядок регламентирует основания и перечень документов для признания задолженности по транспортному налогу и обязательным платежам безнадежной к взысканию при банкротстве или ликвидации."}
+{"parent_id": "tax_901765862", "source_site": "docs.cntd.ru", "section": "НК РФ", "category": "Налог_на_прибыль_организаций", "original_url": "https://docs.cntd.ru/document/901765862", "title": "Статья 264 НК РФ. Прочие расходы, связанные с производством и реализацией (лизинговые платежи)", "details": "НК РФ Часть 2, Глава 25", "collected_at": "2026-11-01 23:40:10", "priority_level": "high", "body": "К прочим расходам относятся арендные и лизинговые платежи за арендуемое имущество, включая транспортные средства, за вычетом выкупной стоимости."}
+{"parent_id": "civics_9027703", "source_site": "docs.cntd.ru", "section": "ГК РФ", "category": "Собственность_приватизация_аренда", "original_url": "https://docs.cntd.ru/document/9027703", "title": "Статья 665 ГК РФ. Договор финансовой аренды (лизинга авто)", "details": "ГК РФ Часть 2, Глава 34", "collected_at": "2026-11-01 23:42:00", "priority_level": "high", "body": "По договору финансовой аренды арендодатель обязуется приобрести в собственность указанное арендатором имущество и предоставить во временное владение и пользование."}
+{"parent_id": "civics_9027704", "source_site": "docs.cntd.ru", "section": "ГК РФ", "category": "Собственность_приватизация_аренда", "original_url": "https://docs.cntd.ru/document/9027704", "title": "Статья 624 ГК РФ. Выкуп арендованного имущества (раскат автомобиля)", "details": "ГК РФ Часть 2, Глава 34", "collected_at": "2026-11-01 23:42:30", "priority_level": "high", "body": "В договоре аренды может быть предусмотрено, что имущество переходит в собственность арендатора по истечении срока или до его истечения при условии внесения выкупной цены."}
+`
+    );
   }
 
   // Generate & download

@@ -4,15 +4,16 @@ Streamlit Web-приложение для RAG-ассистента компан�
     streamlit run streamlit_app.py
 """
 
+import json
 import os
 import sys
-import json
-import yaml
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
+import yaml
 
 # Настройка страницы Streamlit
 st.set_page_config(
@@ -29,9 +30,13 @@ LEGAL_DIR = DATA_DIR / "legal"
 COURT_DIR = DATA_DIR / "court"
 CARS_DIR = DATA_DIR / "cars"
 NEWS_DIR = DATA_DIR / "news"
+LOGS_DIR = BASE_DIR / "logs"
+
+# Путь к единому файлу нормативной базы
+LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
 
 # Инициализация папок
-for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR]:
+for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, LOGS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -74,21 +79,62 @@ def load_news_docs():
 
 @st.cache_data(ttl=60)
 def load_legal_docs():
+    """
+    Загрузка нормативных актов (ГК РФ / НК РФ).
+    Приоритетно читает из единого файла JSONL (laws_gk_nk.jsonl).
+    При его отсутствии обращается к .md файлам.
+    """
     docs = []
-    if LEGAL_DIR.exists():
+    # 1. Чтение из единого JSONL файла
+    if LEGAL_JSONL_FILE.exists():
+        try:
+            with open(LEGAL_JSONL_FILE, "r", encoding="utf-8") as f:
+                for idx, line in enumerate(f):
+                    line = line.strip()
+                    if line:
+                        try:
+                            doc = json.loads(line)
+                            docs.append({
+                                "parent_id": doc.get("parent_id", f"doc_{idx}"),
+                                "source_site": doc.get("source_site", "docs.cntd.ru"),
+                                "section": doc.get("section", "НК РФ" if doc.get("parent_id", "").startswith("tax_") else "ГК РФ"),
+                                "category": doc.get("category", "Нормативная база"),
+                                "original_url": doc.get("original_url", doc.get("url", "https://docs.cntd.ru")),
+                                "title": doc.get("title", f"Документ #{idx}"),
+                                "details": doc.get("details", ""),
+                                "collected_at": doc.get("collected_at", ""),
+                                "priority_level": doc.get("priority_level", "standard"),
+                                "body": doc.get("body", doc.get("full_text", ""))
+                            })
+                        except Exception:
+                            continue
+        except Exception as e:
+            st.error(f"Ошибка чтения JSONL базы законов: {e}")
+
+    # 2. Фоллбэк на .md файлы, если JSONL пока пуст
+    if not docs and LEGAL_DIR.exists():
         for file in LEGAL_DIR.glob("*.md"):
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     content = f.read()
-                    # Парсинг frontmatter
                     if content.startswith("---"):
                         parts = content.split("---", 2)
                         if len(parts) >= 3:
                             meta = yaml.safe_load(parts[1]) or {}
                             body = parts[2].strip()
+                            pid = f"civics_{file.stem}" if "665" in file.stem else f"tax_{file.stem}"
+                            cat = meta.get("category", "Нормативная база")
+                            sec = "НК РФ" if "нк" in cat.lower() or "налог" in cat.lower() else "ГК РФ"
                             docs.append({
-                                "file_name": file.name,
-                                "metadata": meta,
+                                "parent_id": pid,
+                                "source_site": meta.get("source_site", "docs.cntd.ru"),
+                                "section": sec,
+                                "category": cat,
+                                "original_url": meta.get("original_url", "#"),
+                                "title": meta.get("title", file.name),
+                                "details": meta.get("details", ""),
+                                "collected_at": meta.get("collected_at", ""),
+                                "priority_level": meta.get("priority_level", "standard"),
                                 "body": body
                             })
             except Exception:
@@ -122,8 +168,11 @@ with st.sidebar:
     news_data = load_news_docs()
     legal_data = load_legal_docs()
 
+    tax_docs_count = sum(1 for d in legal_data if d.get("section") == "НК РФ" or d.get("parent_id", "").startswith("tax_"))
+    civics_docs_count = sum(1 for d in legal_data if d.get("section") == "ГК РФ" or d.get("parent_id", "").startswith("civics_"))
+
     st.write(f"• Авто в каталоге: **{len(cars_data)} шт.**")
-    st.write(f"• Нормативная база: **{len(legal_data)} статей**")
+    st.write(f"• Законы (JSONL): **{len(legal_data)}** (НК: {tax_docs_count}, ГК: {civics_docs_count})")
     st.write(f"• Решения ВС РФ: **{len(court_data)} актов**")
     st.write(f"• Новостных статей: **{len(news_data)} шт.**")
 
@@ -133,8 +182,9 @@ with st.sidebar:
             try:
                 from rag_pipeline.indexer import ChromaRAGIndexer
                 indexer = ChromaRAGIndexer()
-                res = indexer.index_all()
-                st.success(f"Индексация завершена! Чанков: {res['total_chunks']}")
+                res = indexer.index_all(verbose=False)
+                st.success(f"Индексация завершена! Чанков: {res['total_chunks']}, Документов: {res['parent_docs_count']}")
+                st.rerun()
             except Exception as e:
                 st.error(f"Ошибка индексации: {e}")
 
@@ -152,14 +202,17 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             {
                 "role": "assistant",
                 "content": (
-                    "Здравствуйте! Я RAG-помощник компании по раскату автомобилей. "
-                    "В моей базе знаний: ГК РФ (аренда с выкупом, лизинг, залог), НК РФ (налог на прибыль, НДС), "
-                    "56 решений Верховного Суда по спорам об автомобилях, а также актуальный автопарк raskatof.ru.\n\n"
+                    "Здравствуйте! Я RAG-помощник компании по раскату автомобилей в РФ.\n\n"
+                    "В моей базе знаний:\n"
+                    "- **НК РФ** (транспортный налог, списание безнадежной задолженности, налог на прибыль по ст. 264, НДС)\n"
+                    "- **ГК РФ** (лизинг по ст. 665, аренда с выкупом по ст. 624, аренда ТС без экипажа по ст. 642, банкротство)\n"
+                    "- **Практика ВС РФ** (56 определений по спорам о защите прав потребителей и изъятии авто)\n"
+                    "- **Автопарк raskatof.ru** (комплектации, суточные ставки, выкупные условия)\n\n"
                     "**Примеры вопросов:**\n"
+                    "- *Как рассчитывается списание задолженности по транспортному налогу?*\n"
                     "- *Какие автомобили комфорт-класса доступны с суточной ставкой до 3000 рублей?*\n"
                     "- *Каковы риски арендодателя при банкротстве арендатора согласно позиции ВС РФ?*\n"
-                    "- *Как рассчитывается выкупная стоимость автомобиля по ст. 665 ГК РФ?*\n"
-                    "- *Как повышение утильсбора влияет на лизинговые платежи?*"
+                    "- *Как выкупная стоимость автомобиля учитывается в составе расходов по налогу на прибыль?*"
                 ),
                 "sources": []
             }
@@ -176,6 +229,11 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                 }
                 badges = [target_labels.get(t, t) for t in msg["targets"]]
                 st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
+
+            if msg.get("fallback_used"):
+                with st.expander("ℹ️ Статус подключения Gemini (загружен локальный генератор)"):
+                    st.warning(f"Причина вызова локального синтеза: **{msg.get('fallback_reason')}**")
+                    st.caption("Подробный лог сохранен в: `logs/gemini_connection.log`")
 
             st.markdown(msg["content"])
 
@@ -206,10 +264,14 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                     answer_text = rag_result["answer"]
                     targets = rag_result.get("target_collections", [])
                     sources = rag_result.get("sources", [])
+                    fallback_used = rag_result.get("fallback_used", False)
+                    fallback_reason = rag_result.get("fallback_reason")
                 except Exception as rag_err:
                     answer_text = f"Ошибка RAG пайплайна: {rag_err}"
                     targets = []
                     sources = []
+                    fallback_used = False
+                    fallback_reason = None
 
             # Отображаем плашку роутера
             if targets:
@@ -221,6 +283,11 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                 }
                 badges = [target_labels.get(t, t) for t in targets]
                 st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
+
+            if fallback_used:
+                with st.expander("ℹ️ Статус подключения Gemini (загружен локальный генератор)"):
+                    st.warning(f"Причина: **{fallback_reason}**")
+                    st.caption("Подробный лог сохранен в: `logs/gemini_connection.log`")
 
             st.markdown(answer_text)
 
@@ -241,7 +308,9 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                 "role": "assistant",
                 "content": answer_text,
                 "targets": targets,
-                "sources": sources
+                "sources": sources,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason
             })
 
 
@@ -253,7 +322,6 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
     if not cars_data:
         st.warning("Файл `cars_raskatof.json` пуст или не найден в `data/cars/`. Запустите коллектор `python runner.py --collector cars`.")
     else:
-        # Фильтры
         categories = list(set(c.get("category", "Все") for c in cars_data))
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -263,7 +331,6 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
 
         filtered_cars = cars_data if selected_cat == "Все категории" else [c for c in cars_data if c.get("category") == selected_cat]
 
-        # Карточки авто в сетке
         for i in range(0, len(filtered_cars), 2):
             cols = st.columns(2)
             for j in range(2):
@@ -293,29 +360,60 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
 # --- VIEW 3: НОРМАТИВНАЯ БАЗА (ГК/НК РФ) ---
 elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
     st.header("📜 Нормативно-правовая база (ГК РФ / НК РФ)")
-    st.caption("Формат: .md файлы с YAML-метаданными | Регламент: Раз в 3 месяца")
+    st.caption("Формат: Единый файл `data/legal/laws_gk_nk.jsonl` | Идентификаторы: tax_{id} (НК РФ), civics_{id} (ГК РФ)")
 
     if not legal_data:
-        st.info("Нормативные акты будут загружены в `data/legal/` коллектором `python runner.py --collector laws`.")
+        st.info("Нормативные акты будут загружены в `data/legal/laws_gk_nk.jsonl` коллектором `python runner.py --collector laws`.")
     else:
-        search_query = st.text_input("Поиск по заголовку или тексту статьи:", "")
-        filtered_legal = [
-            doc for doc in legal_data
-            if search_query.lower() in doc["metadata"].get("title", "").lower()
-            or search_query.lower() in doc["body"].lower()
-        ]
+        # Фильтры по разделу и категории
+        col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+        with col_f1:
+            selected_section = st.selectbox("Раздел законодательства:", ["Все разделы", "НК РФ", "ГК РФ"])
+        with col_f2:
+            all_cats = sorted(list(set(d.get("category", "") for d in legal_data if d.get("category"))))
+            selected_category = st.selectbox("Категория (тема):", ["Все категории"] + all_cats)
+        with col_f3:
+            search_query = st.text_input("Поиск по заголовку, номеру или тексту статьи:", "")
 
-        st.write(f"Найдено документов: **{len(filtered_legal)}**")
+        filtered_legal = legal_data
 
-        for doc in filtered_legal[:20]:
-            meta = doc["metadata"]
-            with st.expander(f"📄 {meta.get('title', doc['file_name'])} [{meta.get('priority_level', 'standard').upper()}]"):
-                st.write(f"**Категория:** {meta.get('category', 'ГК РФ')}")
-                st.write(f"**Реквизиты:** {meta.get('details', 'Реквизиты')}")
-                st.write(f"**Приоритет в RAG:** `{meta.get('priority_level', 'standard')}`")
-                st.write(f"**Ссылка:** [{meta.get('original_url', '#')}]({meta.get('original_url', '#')})")
+        if selected_section != "Все разделы":
+            filtered_legal = [d for d in filtered_legal if d.get("section") == selected_section]
+
+        if selected_category != "Все категории":
+            filtered_legal = [d for d in filtered_legal if d.get("category") == selected_category]
+
+        if search_query.strip():
+            sq = search_query.lower()
+            filtered_legal = [
+                d for d in filtered_legal
+                if sq in d.get("title", "").lower()
+                or sq in d.get("parent_id", "").lower()
+                or sq in d.get("details", "").lower()
+                or sq in d.get("body", "").lower()
+            ]
+
+        st.write(f"Найдено документов: **{len(filtered_legal)}** из {len(legal_data)}")
+
+        for doc in filtered_legal[:30]:
+            pid = doc.get("parent_id", "doc")
+            sec = doc.get("section", "Закон")
+            cat = doc.get("category", "Общее")
+            title = doc.get("title", "Нормативный акт")
+            p_lvl = doc.get("priority_level", "standard").upper()
+
+            with st.expander(f"📄 [{pid}] {title} ({sec} / {cat})"):
+                c1, c2, c3 = st.columns([1, 1, 1])
+                c1.write(f"**Раздел:** `{sec}`")
+                c1.write(f"**Parent ID:** `{pid}`")
+                c2.write(f"**Категория:** `{cat}`")
+                c2.write(f"**Приоритет в RAG:** `{p_lvl}`")
+                c3.write(f"**Сбор:** `{doc.get('collected_at', 'Не указано')}`")
+                c3.markdown(f"**Первоисточник:** [{doc.get('original_url', '#')}]({doc.get('original_url', '#')})")
+
+                st.write(f"**Реквизиты:** {doc.get('details', 'Реквизиты отсутствуют')}")
                 st.divider()
-                st.markdown(doc["body"][:2000] + ("..." if len(doc["body"]) > 2000 else ""))
+                st.markdown(doc.get("body", "")[:2500] + ("..." if len(doc.get("body", "")) > 2500 else ""))
 
 
 # --- VIEW 4: СУДЕБНАЯ ПРАКТИКА ВС РФ ---
@@ -374,7 +472,8 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
         "**Текущая конфигурация сервера:**\n\n"
         "• **Сервер:** Локальный ПК (Windows 10 Pro / Home)\n"
         "• **Среда разработки:** PyCharm Community / Professional\n"
-        "• **Фоновый запуск:** Windows Task Scheduler (`schtasks`) или Docker / WSL2"
+        "• **Фоновый запуск:** Windows Task Scheduler (`schtasks`) или Docker / WSL2\n"
+        "• **Хранилище законов:** Единый файл `data/legal/laws_gk_nk.jsonl`"
     )
 
     col1, col2, col3, col4 = st.columns(4)
@@ -385,7 +484,41 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
     with col3:
         st.metric("Практика ВС РФ", f"{len(court_data)} актов", delta="Раз в месяц")
     with col4:
-        st.metric("Нормативная база", f"{len(legal_data)} файлов", delta="Раз в 3 мес")
+        st.metric("Законы (ГК / НК)", f"{len(legal_data)} актов", delta="JSONL файл")
+
+    st.divider()
+
+    # Секция подробного просмотра логов
+    st.subheader("📋 Системные логи и диагностика")
+    st.caption("Подробный аудит подключений к Gemini, переиндексации ChromaDB и работы коллекторов.")
+
+    log_files_map = {
+        "Gemini Connection & Fallbacks (gemini_connection.log)": LOGS_DIR / "gemini_connection.log",
+        "RAG ChromaDB Indexer (rag_indexer.log)": LOGS_DIR / "rag_indexer.log",
+        "Laws Collector Detailed (laws_collector_detailed.log)": LOGS_DIR / "laws_collector_detailed.log",
+        "Cars raskatof.ru Collector (raskatof_cars.log)": LOGS_DIR / "raskatof_cars.log",
+        "Supreme Court Collector (vsrf_court.log)": LOGS_DIR / "vsrf_court.log",
+        "News Collector (auto_news.log)": LOGS_DIR / "auto_news.log"
+    }
+
+    selected_log_name = st.selectbox("Выберите файл логов для просмотра:", list(log_files_map.keys()))
+    selected_log_path = log_files_map[selected_log_name]
+
+    if st.button("🔄 Обновить лог", use_container_width=False):
+        st.rerun()
+
+    if selected_log_path.exists():
+        try:
+            with open(selected_log_path, "r", encoding="utf-8") as lf:
+                log_content = lf.read()
+                if log_content.strip():
+                    st.code(log_content[-5000:], language="log")
+                else:
+                    st.info(f"Файл лога `{selected_log_path.name}` пуст (событий еще не зафиксировано).")
+        except Exception as l_err:
+            st.error(f"Ошибка чтения лога: {l_err}")
+    else:
+        st.caption(f"Файл лога `{selected_log_path.name}` еще не создан. Он появится при первом запуске операции.")
 
     st.divider()
 
@@ -400,11 +533,16 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
     pip install -r requirements.txt
     playwright install chromium
 
-    # 3. Запустить нужный коллектор:
-    python rag_collectors/runner.py --collector cars     # Ассортимент машин
+    # 3. Выполнить переиндексацию ChromaDB (с подробным консольным выводом):
+    reindex_rag.bat
+    # или
+    python reindex_rag.py
+
+    # 4. Запустить нужный коллектор:
+    python rag_collectors/runner.py --collector cars     # Ассортимент машин raskatof.ru
     python rag_collectors/runner.py --collector news     # Автоновости
     python rag_collectors/runner.py --collector vsrf     # Судебная практика ВС РФ
-    python rag_collectors/runner.py --collector laws     # ГК/НК РФ
+    python rag_collectors/runner.py --collector laws     # ГК/НК РФ в единый JSONL
     ```
     """)
 
@@ -415,13 +553,5 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
     ```cmd
     # Запустите от имени Администратора:
     setup_windows_scheduler.bat
-    ```
-    """)
-
-    st.subheader("🐳 Альтернатива: запуск через Docker / WSL2")
-    st.markdown("""
-    ```bash
-    # Запуск через Docker Desktop на Windows 10:
-    docker compose run --rm rag-collector python runner.py --collector all
     ```
     """)

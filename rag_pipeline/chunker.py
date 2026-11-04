@@ -13,7 +13,7 @@ try:
 except ImportError:
     yaml = None
 
-from rag_pipeline.config import CARS_DIR, COURT_DIR, LEGAL_DIR, NEWS_DIR
+from rag_pipeline.config import CARS_DIR, COURT_DIR, LEGAL_DIR, LEGAL_JSONL_FILE, NEWS_DIR
 
 
 def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
@@ -51,78 +51,137 @@ class RAGChunker:
     def chunk_legal_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
         Чанкинг нормативной базы (ГК РФ / НК РФ).
-        Возвращает:
-            child_chunks: компактные фрагменты для векторного поиска
-            parent_store: словарь полных статей с реквизитами для подачи в LLM
+        Читает из единого JSONL файла: data/legal/laws_gk_nk.jsonl
+        с поддержкой префиксов tax_{id} (НК РФ) и civics_{id} (ГК РФ).
         """
         child_chunks = []
         parent_store = {}
 
-        if not LEGAL_DIR.exists():
-            return child_chunks, parent_store
-
-        for file_path in LEGAL_DIR.glob("*.md"):
+        # 1. Чтение из единого JSONL файла
+        if LEGAL_JSONL_FILE.exists():
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
+                with open(LEGAL_JSONL_FILE, "r", encoding="utf-8") as f:
+                    for line_idx, line in enumerate(f):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            doc = json.loads(line)
+                            parent_id = doc.get("parent_id") or f"doc_{line_idx}"
+                            title = doc.get("title", f"Документ #{line_idx}")
+                            section = doc.get("section", "Нормативная база")
+                            category = doc.get("category", "Законодательство")
+                            url = doc.get("original_url", doc.get("url", "https://docs.cntd.ru"))
+                            details = doc.get("details", "")
+                            priority = doc.get("priority_level", "standard")
+                            collected_at = doc.get("collected_at", "")
+                            body = doc.get("body", doc.get("full_text", ""))
 
-                meta = {}
-                body = content
-                if content.startswith("---"):
-                    parts = content.split("---", 2)
-                    if len(parts) >= 3:
-                        if yaml:
-                            meta = yaml.safe_load(parts[1]) or {}
-                        else:
-                            meta = {}
-                            for line in parts[1].split("\n"):
-                                if ":" in line:
-                                    k, v = line.split(":", 1)
-                                    meta[k.strip()] = v.strip().strip('"').strip("'")
-                        body = parts[2].strip()
+                            # Сохраняем родительский документ со всеми реквизитами
+                            parent_store[parent_id] = {
+                                "parent_id": parent_id,
+                                "source_site": doc.get("source_site", "docs.cntd.ru"),
+                                "section": section,
+                                "category": category,
+                                "original_url": url,
+                                "url": url,
+                                "title": title,
+                                "details": details,
+                                "collected_at": collected_at,
+                                "priority_level": priority,
+                                "full_text": body
+                            }
 
-                parent_id = f"law_{file_path.stem}"
-                title = meta.get("title", file_path.stem)
-                url = meta.get("original_url", "https://docs.cntd.ru")
-                details = meta.get("details", "")
-                priority = meta.get("priority_level", "standard")
-                category = meta.get("category", "Нормативная база")
+                            # Извлекаем пункты (small chunks) для точного поиска
+                            clauses = split_text_into_clauses(body, max_chars=450, min_chars=70)
+                            for idx, clause in enumerate(clauses):
+                                chunk_id = f"{parent_id}_c{idx}"
+                                searchable_text = f"{section} | {title} ({category}). {clause}"
+                                child_chunks.append({
+                                    "id": chunk_id,
+                                    "parent_id": parent_id,
+                                    "text": searchable_text,
+                                    "metadata": {
+                                        "parent_id": parent_id,
+                                        "section": section,
+                                        "category": category,
+                                        "title": title,
+                                        "url": url,
+                                        "details": details,
+                                        "priority_level": priority,
+                                        "collected_at": collected_at,
+                                        "doc_type": "legal_law",
+                                        "chunk_index": idx
+                                    }
+                                })
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
-                # Сохраняем родительский документ целиком
-                parent_store[parent_id] = {
-                    "parent_id": parent_id,
-                    "title": title,
-                    "url": url,
-                    "details": details,
-                    "priority_level": priority,
-                    "category": category,
-                    "full_text": body
-                }
+        # 2. Резервный поиск в .md файлах, если JSONL не найден
+        if not parent_store and LEGAL_DIR.exists():
+            for file_path in LEGAL_DIR.glob("*.md"):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
 
-                # Извлекаем пункты (small chunks) для поиска
-                clauses = split_text_into_clauses(body, max_chars=450, min_chars=70)
-                for idx, clause in enumerate(clauses):
-                    chunk_id = f"{parent_id}_c{idx}"
-                    # Добавляем название статьи к чанку для сохранения контекста
-                    searchable_text = f"{title}. {clause}"
-                    child_chunks.append({
-                        "id": chunk_id,
+                    meta = {}
+                    body = content
+                    if content.startswith("---"):
+                        parts = content.split("---", 2)
+                        if len(parts) >= 3:
+                            if yaml:
+                                meta = yaml.safe_load(parts[1]) or {}
+                            else:
+                                meta = {}
+                                for mline in parts[1].split("\n"):
+                                    if ":" in mline:
+                                        k, v = mline.split(":", 1)
+                                        meta[k.strip()] = v.strip().strip('"').strip("'")
+                            body = parts[2].strip()
+
+                    parent_id = f"civics_{file_path.stem}" if "665" in file_path.stem else f"tax_{file_path.stem}"
+                    title = meta.get("title", file_path.stem)
+                    url = meta.get("original_url", "https://docs.cntd.ru")
+                    details = meta.get("details", "")
+                    priority = meta.get("priority_level", "standard")
+                    category = meta.get("category", "Нормативная база")
+                    section = "НК РФ" if "нк" in category.lower() or "налог" in category.lower() else "ГК РФ"
+
+                    parent_store[parent_id] = {
                         "parent_id": parent_id,
-                        "text": searchable_text,
-                        "metadata": {
-                            "parent_id": parent_id,
-                            "title": title,
-                            "url": url,
-                            "details": details,
-                            "priority_level": priority,
-                            "category": category,
-                            "doc_type": "legal_law",
-                            "chunk_index": idx
-                        }
-                    })
+                        "title": title,
+                        "url": url,
+                        "details": details,
+                        "priority_level": priority,
+                        "category": category,
+                        "section": section,
+                        "full_text": body
+                    }
 
-            except Exception as e:
-                continue
+                    clauses = split_text_into_clauses(body, max_chars=450, min_chars=70)
+                    for idx, clause in enumerate(clauses):
+                        chunk_id = f"{parent_id}_c{idx}"
+                        searchable_text = f"{section} | {title}. {clause}"
+                        child_chunks.append({
+                            "id": chunk_id,
+                            "parent_id": parent_id,
+                            "text": searchable_text,
+                            "metadata": {
+                                "parent_id": parent_id,
+                                "section": section,
+                                "title": title,
+                                "url": url,
+                                "details": details,
+                                "priority_level": priority,
+                                "category": category,
+                                "doc_type": "legal_law",
+                                "chunk_index": idx
+                            }
+                        })
+                except Exception:
+                    continue
 
         return child_chunks, parent_store
 
@@ -312,3 +371,5 @@ class RAGChunker:
             pass
 
         return child_chunks, parent_store
+
+    chunk_auto_news = chunk_news_docs

@@ -20,6 +20,13 @@ LEGAL_DIR = DATA_DIR / "legal"
 COURT_DIR = DATA_DIR / "court"
 CARS_DIR = DATA_DIR / "cars"
 NEWS_DIR = DATA_DIR / "news"
+LOGS_DIR = BASE_DIR / "logs"
+
+# Путь к единому файлу нормативной базы ГК РФ и НК РФ
+LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
+
+for _d in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, CHROMA_DIR, LOGS_DIR]:
+    _d.mkdir(parents=True, exist_ok=True)
 
 # Имена коллекций в ChromaDB
 COLLECTION_LAWS = "legal_laws"
