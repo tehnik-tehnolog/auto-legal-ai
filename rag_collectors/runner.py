@@ -95,6 +95,20 @@ def print_status_dashboard():
     print(f"   - Статей в базе:    {news_count} шт.")
     print(f"   - Файл:             {news_file}")
     print(f"   - Регламент:        Раз в неделю")
+
+    # 5. ПДД РФ (ГИБДД РФ PDF)
+    from config.settings import PDD_DIR, PDD_RULES_FILE
+    pdd_count = 0
+    if PDD_RULES_FILE.exists():
+        try:
+            with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
+                pdd_count = len(json.load(f))
+        except Exception:
+            pass
+    print(f"\n5. 🚦 Правила дорожного движения РФ (ПДД РФ):")
+    print(f"   - Пунктов/абзацев:  {pdd_count} шт.")
+    print(f"   - Файл:             {PDD_RULES_FILE}")
+    print(f"   - Регламент:        По мере изменений в ПДД")
     print("=" * 70 + "\n")
 
 
@@ -102,6 +116,7 @@ async def run_collector(collector_name: str) -> bool:
     """Запуск выбранного коллектора"""
     from collectors.auto_news import AutoNewsCollector
     from collectors.gk_nk_laws import LawsCollector
+    from collectors.pdd import PDDCollector
     from collectors.raskatof_cars import CarsCollector
     from collectors.vsrf_court import VSRFCourtCollector
 
@@ -109,7 +124,8 @@ async def run_collector(collector_name: str) -> bool:
         "laws": LawsCollector,
         "vsrf": VSRFCourtCollector,
         "cars": CarsCollector,
-        "news": AutoNewsCollector
+        "news": AutoNewsCollector,
+        "pdd": PDDCollector
     }
 
     if collector_name not in collectors_map and collector_name != "all":
@@ -136,8 +152,8 @@ def main():
     )
     parser.add_argument(
         "--collector",
-        choices=["laws", "vsrf", "cars", "news", "all"],
-        help="Какой коллектор запустить (laws=ГК/НК РФ, vsrf=ВС РФ, cars=raskatof.ru, news=автоновости, all=все)"
+        choices=["laws", "vsrf", "cars", "news", "pdd", "all"],
+        help="Какой коллектор запустить (laws=ГК/НК РФ, vsrf=ВС РФ, cars=raskatof.ru, news=автоновости, pdd=ПДД РФ, all=все)"
     )
     parser.add_argument(
         "--status",

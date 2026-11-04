@@ -20,10 +20,12 @@ from rag_pipeline.config import (
     COLLECTION_COURT,
     COLLECTION_LAWS,
     COLLECTION_NEWS,
+    COLLECTION_PDD,
     EMBEDDING_MODEL,
     LEGAL_JSONL_FILE,
     LOGS_DIR,
     MODEL_NAME,
+    PDD_RULES_FILE,
 )
 from rag_pipeline.chunker import RAGChunker
 
@@ -218,6 +220,15 @@ class ChromaRAGIndexer:
             print(f"     • Новостных статей:    {len(news_parents)} шт.")
             print(f"     • Сгенерировано чанков:{len(news_chunks)} фрагментов (время: {t_news:.2f} с)")
 
+        # 1.5 Правила дорожного движения РФ (ПДД РФ)
+        t0 = time.time()
+        pdd_chunks, pdd_parents = RAGChunker.chunk_pdd_rules()
+        t_pdd = time.time() - t0
+        if verbose:
+            print(f"  🚦 [5] Правила дорожного движения РФ (ПДД РФ):")
+            print(f"     • Смысловых пунктов:   {len(pdd_parents)} шт.")
+            print(f"     • Сгенерировано чанков:{len(pdd_chunks)} пунктов/абзацев (время: {t_pdd:.2f} с)")
+
         # -------------------------------------------------------------
         # ШАГ 2: Сохранение объединенного хранилища Parent-документов
         # -------------------------------------------------------------
@@ -230,6 +241,7 @@ class ChromaRAGIndexer:
         self.parent_store.update(court_parents)
         self.parent_store.update(cars_parents)
         self.parent_store.update(news_parents)
+        self.parent_store.update(pdd_parents)
         self.save_parent_store()
 
         store_size_kb = round(self.parent_store_path.stat().st_size / 1024, 1) if self.parent_store_path.exists() else 0
@@ -241,17 +253,18 @@ class ChromaRAGIndexer:
             print(f"     • Размер на диске:               {store_size_kb} КБ")
 
         # -------------------------------------------------------------
-        # ШАГ 3: Запись в 4 раздельные коллекции ChromaDB
+        # ШАГ 3: Запись в раздельные коллекции ChromaDB
         # -------------------------------------------------------------
         if verbose:
-            print("\n[ШАГ 3/4] ЗАПИСЬ В 4 РАЗДЕЛЬНЫЕ КОЛЛЕКЦИИ CHROMADB")
+            print("\n[ШАГ 3/4] ЗАПИСЬ В 5 РАЗДЕЛЬНЫХ КОЛЛЕКЦИЙ CHROMADB")
             print("-" * 76)
 
         collection_data = [
             (COLLECTION_LAWS, laws_chunks, "Нормативная база (ГК/НК РФ)"),
             (COLLECTION_COURT, court_chunks, "Судебная практика ВС РФ"),
             (COLLECTION_CARS, cars_chunks, "Каталог авто raskatof.ru"),
-            (COLLECTION_NEWS, news_chunks, "Автоновости и рынок")
+            (COLLECTION_NEWS, news_chunks, "Автоновости и рынок"),
+            (COLLECTION_PDD, pdd_chunks, "Правила дорожного движения (ПДД РФ)")
         ]
 
         chroma_active = bool(self.client is not None)
@@ -366,3 +379,136 @@ class ChromaRAGIndexer:
 
         logger.info(f"Индексация завершена: {stats['total_chunks']} чанков, {stats['parent_docs_count']} документов за {t_total} сек.")
         return stats
+
+    def index_selected(
+        self,
+        target_collections: Optional[List[str]] = None,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Быстрая выборочная переиндексация указанных коллекций.
+        По умолчанию переиндексирует только легкие и часто обновляемые источники:
+        Каталог автомобилей (car_catalog) и Автоновости (auto_news).
+        Не затрагивает тяжелый массив нормативной базы (ГК/НК РФ) и судебной практики.
+        """
+        if not target_collections:
+            target_collections = [COLLECTION_CARS, COLLECTION_NEWS]
+
+        t_start = time.time()
+        if verbose:
+            print("=" * 76)
+            print("⚡ БЫСТРАЯ ВЫБОРОЧНАЯ ПЕРЕИНДЕКСАЦИЯ RAG (АВТОПАРК + НОВОСТИ)")
+            print("=" * 76)
+            print(f"  • Время запуска:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  • Целевые коллекции:   {', '.join(target_collections)}")
+            print("=" * 76)
+
+        # 1. Загружаем существующий ParentStore
+        self.load_parent_store()
+
+        # 2. Загружаем существующие BM25 индексы
+        bm25_store = {}
+        if self.bm25_store_path.exists():
+            try:
+                with open(self.bm25_store_path, "r", encoding="utf-8") as f:
+                    bm25_store = json.load(f)
+            except Exception:
+                bm25_store = {}
+
+        stats = {
+            "total_chunks": 0,
+            "collections": {},
+            "parent_docs_count": 0,
+            "duration_sec": 0.0,
+            "mode": "partial"
+        }
+
+        # 3. Выборочный чанкинг запрошенных коллекций
+        chunks_map: Dict[str, Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], str]] = {}
+
+        if COLLECTION_CARS in target_collections or "cars" in target_collections or "car_catalog" in target_collections:
+            c_chunks, c_parents = RAGChunker.chunk_cars_catalog()
+            chunks_map[COLLECTION_CARS] = (c_chunks, c_parents, "Каталог авто raskatof.ru")
+
+        if COLLECTION_NEWS in target_collections or "news" in target_collections or "auto_news" in target_collections:
+            n_chunks, n_parents = RAGChunker.chunk_auto_news()
+            chunks_map[COLLECTION_NEWS] = (n_chunks, n_parents, "Автоновости и рынок")
+
+        if COLLECTION_PDD in target_collections or "pdd" in target_collections or "traffic_rules" in target_collections:
+            p_chunks, p_parents = RAGChunker.chunk_pdd_rules()
+            chunks_map[COLLECTION_PDD] = (p_chunks, p_parents, "Правила дорожного движения (ПДД РФ)")
+
+        if COLLECTION_COURT in target_collections or "vsrf" in target_collections or "court_cases" in target_collections:
+            co_chunks, co_parents = RAGChunker.chunk_court_docs()
+            chunks_map[COLLECTION_COURT] = (co_chunks, co_parents, "Судебная практика ВС РФ")
+
+        if COLLECTION_LAWS in target_collections or "laws" in target_collections or "legal_laws" in target_collections:
+            l_chunks, l_parents = RAGChunker.chunk_legal_docs()
+            chunks_map[COLLECTION_LAWS] = (l_chunks, l_parents, "Нормативная база (ГК/НК РФ)")
+
+        # 4. Обновляем ParentStore только для выбранных коллекций
+        for coll_name, (chunks, parents, label) in chunks_map.items():
+            self.parent_store.update(parents)
+        self.save_parent_store()
+        stats["parent_docs_count"] = len(self.parent_store)
+
+        # 5. Обновляем ChromaDB и BM25
+        for coll_name, (chunks, parents, label) in chunks_map.items():
+            c_len = len(chunks)
+            if verbose:
+                print(f"  • Выборочное обновление [{coll_name}] ({label}): {c_len} чанков...")
+
+            if self.client:
+                try:
+                    try:
+                        self.client.delete_collection(coll_name)
+                    except Exception:
+                        pass
+
+                    if chunks:
+                        coll = self.client.get_or_create_collection(
+                            name=coll_name,
+                            metadata={"hnsw:space": "cosine"}
+                        )
+                        ids = [c["id"] for c in chunks]
+                        docs = [c["text"] for c in chunks]
+                        metas = [c["metadata"] for c in chunks]
+                        coll.add(ids=ids, documents=docs, metadatas=metas)
+                except Exception as ex:
+                    logger.warning(f"Ошибка выборочного обновления Chroma ({coll_name}): {ex}")
+
+            # Обновление индекса BM25 для этой коллекции
+            bm25 = SimpleBM25Index()
+            bm25.build(chunks)
+            bm25_store[coll_name] = {
+                "ids": [c["id"] for c in chunks],
+                "texts": [c["text"] for c in chunks],
+                "metas": [c["metadata"] for c in chunks],
+                "avgdl": round(bm25.avgdl, 2),
+                "vocab_size": len(bm25.doc_freqs)
+            }
+
+            # Сохранение резервного JSON с чанками
+            chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
+            with open(chunk_backup_file, "w", encoding="utf-8") as f:
+                json.dump(chunks, f, ensure_ascii=False, indent=2)
+
+            stats["collections"][coll_name] = c_len
+            stats["total_chunks"] += c_len
+
+        # Сохраняем объединенный BM25 файл
+        with open(self.bm25_store_path, "w", encoding="utf-8") as f:
+            json.dump(bm25_store, f, ensure_ascii=False, indent=2)
+
+        t_total = round(time.time() - t_start, 2)
+        stats["duration_sec"] = t_total
+
+        if verbose:
+            print("=" * 76)
+            print(f"✅ ВЫБОРОЧНАЯ ПЕРЕИНДЕКСАЦИЯ ЗАВЕРШЕНА ЗА {t_total} СЕК!")
+            print(f"   Обновлено чанков: {stats['total_chunks']} (коллекции: {', '.join(chunks_map.keys())})")
+            print("=" * 76)
+
+        return stats
+
+    index_partial = index_selected

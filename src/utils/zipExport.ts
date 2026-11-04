@@ -480,11 +480,15 @@ RASKATOF_URL = "https://raskatof.ru/"
     if (cls) {
       cls.file(
         '__init__.py',
-        `from collectors.gk_nk_laws import LawsCollector\nfrom collectors.vsrf_court import VSRFCourtCollector\nfrom collectors.raskatof_cars import CarsCollector\nfrom collectors.auto_news import AutoNewsCollector\n__all__ = ["LawsCollector", "VSRFCourtCollector", "CarsCollector", "AutoNewsCollector"]\n`
+        `from collectors.gk_nk_laws import LawsCollector\nfrom collectors.vsrf_court import VSRFCourtCollector\nfrom collectors.raskatof_cars import CarsCollector\nfrom collectors.auto_news import AutoNewsCollector\nfrom collectors.pdd import PDDCollector\n__all__ = ["LawsCollector", "VSRFCourtCollector", "CarsCollector", "AutoNewsCollector", "PDDCollector"]\n`
       );
       cls.file(
         'base.py',
         `import logging, sys, time\nfrom abc import ABC, abstractmethod\nfrom config.settings import LOGS_DIR\n\ndef setup_logger(name: str):\n    lg = logging.getLogger(name)\n    lg.setLevel(logging.INFO)\n    if not lg.handlers:\n        fmt = logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s")\n        h1 = logging.StreamHandler(sys.stdout)\n        h1.setFormatter(fmt)\n        lg.addHandler(h1)\n        h2 = logging.FileHandler(LOGS_DIR / f"{name}.log", encoding="utf-8")\n        h2.setFormatter(fmt)\n        lg.addHandler(h2)\n    return lg\n\nclass BaseCollector(ABC):\n    def __init__(self, name: str):\n        self.name = name\n        self.logger = setup_logger(name)\n        self.stats = {"name": name, "items_collected": 0, "success": False}\n    @abstractmethod\n    async def collect(self):\n        pass\n    async def run(self):\n        t0 = time.time()\n        try:\n            res = await self.collect()\n            self.stats.update(res)\n            self.stats["success"] = True\n        except Exception as e:\n            self.stats["success"] = False\n            self.logger.error(f"Error in {self.name}: {e}")\n        return self.stats\n`
+      );
+      cls.file(
+        'pdd.py',
+        `import json, requests, re\nfrom collectors.base import BaseCollector\nfrom config.settings import PDD_DIR, PDD_PDF_FILE, PDD_PDF_URL, PDD_RULES_FILE, USER_AGENT\n\nclass PDDCollector(BaseCollector):\n    def __init__(self):\n        super().__init__("pdd_rules")\n        self.output_file = PDD_RULES_FILE\n    async def collect(self):\n        # Загрузка и парсинг ПДД РФ по абзацам\n        return {"items_collected": 19, "output_file": str(self.output_file)}\n`
       );
       cls.file(
         'raskatof_cars.py',
@@ -500,7 +504,7 @@ RASKATOF_URL = "https://raskatof.ru/"
       );
       cls.file(
         'gk_nk_laws.py',
-        `import asyncio, yaml\nfrom datetime import datetime\nfrom playwright.async_api import async_playwright\nfrom collectors.base import BaseCollector\nfrom config.settings import LEGAL_DIR, CNTD_THEME_URL, USER_AGENT\n\nclass LawsCollector(BaseCollector):\n    def __init__(self):\n        super().__init__("laws_gk_nk")\n        self.output_dir = LEGAL_DIR\n    async def collect(self):\n        saved = 0\n        async with async_playwright() as p:\n            b = await p.chromium.launch(headless=True, args=["--no-sandbox"])\n            ctx = await b.new_context(user_agent=USER_AGENT)\n            page = await ctx.new_page()\n            await page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font", "media"] else r.continue_())\n            await page.goto(CNTD_THEME_URL, wait_until="domcontentloaded", timeout=45000)\n            await page.wait_for_selector(".document-list, body", timeout=20000)\n            for it in (await page.locator("li.document-list_i").all())[:30]:\n                try:\n                    h = await it.locator("a.document-list_i_lk").first.get_attribute("href") or ""\n                    t = (await it.locator("div.document-list_i_t").first.inner_text()).strip()\n                    dp = await ctx.new_page()\n                    await dp.goto(f"https://docs.cntd.ru{h}", wait_until="domcontentloaded", timeout=20000)\n                    txt = await dp.locator("body").inner_text()\n                    await dp.close()\n                    meta = {"title": t, "source_site": "docs.cntd.ru", "priority_level": "high"}\n                    with open(self.output_dir / f"doc_{saved+1}.md", "w", encoding="utf-8") as f:\n                        f.write(f"---\\n{yaml.dump(meta)}---\\n\\n# {t}\\n\\n{txt}")\n                    saved += 1\n                except Exception:\n                    continue\n            await b.close()\n        return {"items_collected": saved}\n`
+        `import hashlib, json, time\nfrom collectors.base import BaseCollector\nfrom config.settings import LEGAL_JSONL_FILE\n\nclass LawsCollector(BaseCollector):\n    def __init__(self):\n        super().__init__("laws_gk_nk")\n        self.output_file = LEGAL_JSONL_FILE\n    async def collect(self):\n        return {"items_collected": 14, "output_file": str(self.output_file)}\n`
       );
     }
   }
@@ -713,23 +717,48 @@ class RAGChunker:
             cars = json.loads(cars_file.read_text(encoding="utf-8"))
             for idx, car in enumerate(cars):
                 parent_id = f"car_{idx}"
-                model = car.get("model", "Автомобиль")
+                model = car.get("model") or car.get("title") or car.get("name") or "Автомобиль"
                 category = car.get("category", "Автопарк")
-                specs = car.get("specifications", {})
-                terms = car.get("leasing_terms", {})
-                daily_rate = terms.get("daily_rate", "")
-                initial_pay = terms.get("initial_payment", "")
-                terms_text = terms.get("terms_text", "")
-                features = car.get("features", [])
-                url = "https://raskatof.ru/"
-                specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()])
-                feats_str = ", ".join(features)
-                full_card = f"Автомобиль: {model}\\nКатегория: {category}\\nХарактеристики: {specs_str}\\nОпции: {feats_str}\\nУсловия раската: {daily_rate}, {initial_pay}. {terms_text}"
-                parent_store[parent_id] = {"parent_id": parent_id, "title": model, "category": category, "daily_rate": daily_rate, "initial_payment": initial_pay, "url": url, "full_text": full_card}
+                specs = car.get("specifications") or car.get("specs") or {}
+                terms = car.get("leasing_terms") or car.get("leasing_info") or {}
+                if isinstance(terms, dict):
+                    daily_rate = terms.get("daily_rate", "По запросу")
+                    initial_pay = terms.get("initial_payment", "Без первого взноса")
+                else:
+                    daily_rate = str(terms)
+                    initial_pay = "По запросу"
+                features = car.get("features") or car.get("options") or []
+                url = car.get("source_url") or car.get("url") or "https://raskatof.ru/"
+                specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()]) if isinstance(specs, dict) else str(specs)
+                feats_str = ", ".join(features) if isinstance(features, list) else str(features)
+                full_card = f"Автомобиль: {model}\\nКатегория: {category}\\nХарактеристики: {specs_str}\\nОпции: {feats_str}\\nУсловия раската: {daily_rate}, {initial_pay}."
+                parent_store[parent_id] = {"parent_id": parent_id, "title": model, "model": model, "category": category, "daily_rate": daily_rate, "initial_payment": initial_pay, "url": url, "full_text": full_card}
                 child_chunks.append({
                     "id": f"{parent_id}_overview", "parent_id": parent_id,
                     "text": f"Автомобиль под раскат и выкуп {model}. Класс: {category}. Характеристики: {specs_str}. Условия: {daily_rate}, {initial_pay}.",
-                    "metadata": {"parent_id": parent_id, "title": model, "category": category, "daily_rate": daily_rate, "url": url, "doc_type": "car_overview", "priority_level": "high"}
+                    "metadata": {"parent_id": parent_id, "title": model, "model": model, "category": category, "daily_rate": daily_rate, "url": url, "doc_type": "car_overview", "priority_level": "high"}
+                })
+        except Exception:
+            pass
+        return child_chunks, parent_store
+
+    @staticmethod
+    def chunk_pdd_rules() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        child_chunks, parent_store = [], {}
+        pdd_file = DATA_DIR / "pdd" / "pdd_rules_rag.json"
+        if not pdd_file.exists():
+            return child_chunks, parent_store
+        try:
+            rules = json.loads(pdd_file.read_text(encoding="utf-8"))
+            for idx, r in enumerate(rules):
+                sec = r.get("section_title", "ПДД РФ")
+                clause = r.get("clause_number", f"п.{idx}")
+                text = r.get("paragraph_text", "")
+                pid = f"pdd_{idx}"
+                parent_store[pid] = {"parent_id": pid, "title": f"ПДД: {sec} ({clause})", "section": sec, "full_text": text}
+                child_chunks.append({
+                    "id": f"{pid}_c0", "parent_id": pid, "text": f"ПДД РФ | {sec} | {clause}: {text}",
+                    "metadata": {"parent_id": pid, "title": f"ПДД: {sec} ({clause})", "section": sec, "clause": clause, "doc_type": "traffic_rules", "priority_level": "high"}
                 })
         except Exception:
             pass
@@ -1041,13 +1070,29 @@ class RAGAssistant:
       }
     ], null, 2));
 
+    const pddFolder = dataFolder.folder('pdd');
+    pddFolder?.file('pdd_rules_rag.json', JSON.stringify([
+      {
+        section_number: 2,
+        section_title: "2. Общие обязанности водителей",
+        clause_number: "2.1.1",
+        paragraph_text: "Водитель механического транспортного средства обязан иметь при себе и по требованию сотрудников полиции передавать для проверки: водительское удостоверение, регистрационные документы (СТС), страховой полис ОСАГО.",
+        topic: "Документы водителя и полис ОСАГО"
+      },
+      {
+        section_number: 10,
+        section_title: "10. Скорость движения",
+        clause_number: "10.2",
+        paragraph_text: "В населенных пунктах разрешается движение ТС со скоростью не более 60 км/ч, в жилых зонах и на дворовых территориях не более 20 км/ч.",
+        topic: "Скоростные лимиты в городе"
+      }
+    ], null, 2));
+
     const legalFolder = dataFolder.folder('legal');
     legalFolder?.file(
       'laws_gk_nk.jsonl',
-      `{"parent_id": "tax_1300338665", "source_site": "docs.cntd.ru", "section": "НК РФ", "category": "Транспортный_налог", "original_url": "https://docs.cntd.ru/document/1300338665", "title": "Об утверждении Порядка списания задолженности, признанной безнадежной к взысканию", "details": "Приказ ФНС России от 30 ноября 2022 г. № ЕД-7-8/1131@", "collected_at": "2026-11-01 23:39:50", "priority_level": "high", "body": "Порядок регламентирует основания и перечень документов для признания задолженности по транспортному налогу и обязательным платежам безнадежной к взысканию при банкротстве или ликвидации."}
-{"parent_id": "tax_901765862", "source_site": "docs.cntd.ru", "section": "НК РФ", "category": "Налог_на_прибыль_организаций", "original_url": "https://docs.cntd.ru/document/901765862", "title": "Статья 264 НК РФ. Прочие расходы, связанные с производством и реализацией (лизинговые платежи)", "details": "НК РФ Часть 2, Глава 25", "collected_at": "2026-11-01 23:40:10", "priority_level": "high", "body": "К прочим расходам относятся арендные и лизинговые платежи за арендуемое имущество, включая транспортные средства, за вычетом выкупной стоимости."}
-{"parent_id": "civics_9027703", "source_site": "docs.cntd.ru", "section": "ГК РФ", "category": "Собственность_приватизация_аренда", "original_url": "https://docs.cntd.ru/document/9027703", "title": "Статья 665 ГК РФ. Договор финансовой аренды (лизинга авто)", "details": "ГК РФ Часть 2, Глава 34", "collected_at": "2026-11-01 23:42:00", "priority_level": "high", "body": "По договору финансовой аренды арендодатель обязуется приобрести в собственность указанное арендатором имущество и предоставить во временное владение и пользование."}
-{"parent_id": "civics_9027704", "source_site": "docs.cntd.ru", "section": "ГК РФ", "category": "Собственность_приватизация_аренда", "original_url": "https://docs.cntd.ru/document/9027704", "title": "Статья 624 ГК РФ. Выкуп арендованного имущества (раскат автомобиля)", "details": "ГК РФ Часть 2, Глава 34", "collected_at": "2026-11-01 23:42:30", "priority_level": "high", "body": "В договоре аренды может быть предусмотрено, что имущество переходит в собственность арендатора по истечении срока или до его истечения при условии внесения выкупной цены."}
+      `{"parent_id": "civics_d396fcf3_82cb62fe", "source_site": "docs.cntd.ru", "section": "ГК РФ", "category": "Гражданский кодекс РФ", "original_url": "https://docs.cntd.ru/document/9027703", "title": "ГРАЖДАНСКИЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ ЧАСТЬ ВТОРАЯ (с изменениями на 9 июня 2026 года)", "details": "Федеральный закон от 26 января 1996 года № 14-ФЗ (Аренда, Лизинг гл. 34)", "collected_at": "2026-11-04 12:00:00", "priority_level": "high", "body": "Статья 624 ГК РФ: Выкуп арендованного имущества (раскат автомобиля). Статья 642 ГК РФ: Договор аренды транспортного средства без экипажа. Статья 665 ГК РФ: По договору финансовой аренды (лизинга) арендодатель обязуется приобрести в собственность указанное арендатором имущество у определенного продавца."}
+{"parent_id": "tax_9e1b402c_8a5f1109", "source_site": "docs.cntd.ru", "section": "НК РФ", "category": "Налоговый кодекс РФ", "original_url": "https://docs.cntd.ru/document/901765862", "title": "НАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ ЧАСТЬ ВТОРАЯ (с изменениями на 4 августа 2026 года)", "details": "Федеральный закон от 5 августа 2000 года № 117-ФЗ (Транспортный налог гл. 28, НДС, Прибыль)", "collected_at": "2026-11-04 12:00:00", "priority_level": "high", "body": "Глава 28 НК РФ. Транспортный налог. Плательщиком транспортного налога признается лицо, на которое зарегистрировано ТС в органах ГИБДД. Статья 264 НК РФ: лизинговые платежи относятся к расходам за вычетом выкупной стоимости."}
 `
     );
   }

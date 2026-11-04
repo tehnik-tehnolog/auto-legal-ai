@@ -30,17 +30,30 @@ LEGAL_DIR = DATA_DIR / "legal"
 COURT_DIR = DATA_DIR / "court"
 CARS_DIR = DATA_DIR / "cars"
 NEWS_DIR = DATA_DIR / "news"
+PDD_DIR = DATA_DIR / "pdd"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Путь к единому файлу нормативной базы
+# Путь к единому файлу нормативной базы и ПДД
 LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
+PDD_RULES_FILE = PDD_DIR / "pdd_rules_rag.json"
 
 # Инициализация папок
-for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, LOGS_DIR]:
+for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, PDD_DIR, LOGS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 
 # --- ФУНКЦИИ ЗАГРУЗКИ ДАННЫХ ---
+@st.cache_data(ttl=60)
+def load_pdd_rules():
+    if PDD_RULES_FILE.exists():
+        try:
+            with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Ошибка чтения базы ПДД: {e}")
+    return []
+
+
 @st.cache_data(ttl=60)
 def load_cars_catalog():
     cars_file = CARS_DIR / "cars_raskatof.json"
@@ -153,6 +166,7 @@ with st.sidebar:
             "💬 RAG Ассистент (Чат)",
             "🚙 Каталог авто (raskatof.ru)",
             "📜 Нормативная база (ГК/НК РФ)",
+            "🚦 Правила дорожного движения (ПДД РФ)",
             "⚖️ Судебная практика ВС РФ",
             "📰 Автоновости и рынок",
             "⚙️ Статус сбора и сервер (Windows 10)",
@@ -167,18 +181,32 @@ with st.sidebar:
     court_data = load_court_docs()
     news_data = load_news_docs()
     legal_data = load_legal_docs()
+    pdd_data = load_pdd_rules()
 
     tax_docs_count = sum(1 for d in legal_data if d.get("section") == "НК РФ" or d.get("parent_id", "").startswith("tax_"))
     civics_docs_count = sum(1 for d in legal_data if d.get("section") == "ГК РФ" or d.get("parent_id", "").startswith("civics_"))
 
     st.write(f"• Авто в каталоге: **{len(cars_data)} шт.**")
     st.write(f"• Законы (JSONL): **{len(legal_data)}** (НК: {tax_docs_count}, ГК: {civics_docs_count})")
+    st.write(f"• ПДД РФ (абзацы): **{len(pdd_data)} пунктов**")
     st.write(f"• Решения ВС РФ: **{len(court_data)} актов**")
     st.write(f"• Новостных статей: **{len(news_data)} шт.**")
 
-    # Кнопка переиндексации
-    if st.button("🔄 Переиндексировать RAG (ChromaDB + BM25)", use_container_width=True):
-        with st.spinner("Переиндексация 4 коллекций..."):
+    # Кнопка быстрой выборочной переиндексации (Машины + Новости)
+    if st.button("🔄 Переиндексировать только (Машины + Новости)", use_container_width=True, type="primary"):
+        with st.spinner("Быстрая переиндексация каталога авто и новостей..."):
+            try:
+                from rag_pipeline.indexer import ChromaRAGIndexer
+                indexer = ChromaRAGIndexer()
+                res = indexer.index_partial(["car_catalog", "auto_news"], verbose=False)
+                st.success(f"⚡ Быстро обновлено {res['total_chunks']} чанков за {res['duration_sec']} с!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка частичной индексации: {e}")
+
+    # Кнопка полной переиндексации
+    if st.button("⚡ Полная переиндексация (Все 5 коллекций)", use_container_width=True):
+        with st.spinner("Полная переиндексация 5 коллекций..."):
             try:
                 from rag_pipeline.indexer import ChromaRAGIndexer
                 indexer = ChromaRAGIndexer()
@@ -338,19 +366,32 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
                     car = filtered_cars[i + j]
                     with cols[j]:
                         with st.container(border=True):
-                            st.subheader(car.get("model", "Автомобиль"))
-                            st.caption(f"Класс: {car.get('category', 'Эконом')}")
+                            model_display = car.get("model") or car.get("title") or car.get("name") or "Автомобиль"
+                            st.subheader(model_display)
+                            st.caption(f"Класс: {car.get('category', 'Эконом и комфорт класс')}")
 
-                            terms = car.get("leasing_terms", {})
-                            st.write(f"💰 **{terms.get('daily_rate', 'По запросу')}**")
-                            st.write(f"🔑 **{terms.get('initial_payment', 'Без взноса')}**")
+                            terms = car.get("leasing_terms") or car.get("leasing_info") or {}
+                            if isinstance(terms, dict):
+                                daily = terms.get("daily_rate") or terms.get("daily") or "По запросу"
+                                initial = terms.get("initial_payment") or terms.get("initial") or "Без первого взноса"
+                            else:
+                                daily = str(terms)
+                                initial = "По запросу"
+
+                            st.write(f"💰 **{daily}**")
+                            st.write(f"🔑 **{initial}**")
 
                             st.write("**Характеристики:**")
-                            specs = car.get("specifications", {})
-                            spec_text = " • ".join([f"{k}: {v}" for k, v in specs.items()])
+                            specs = car.get("specifications") or car.get("specs") or {}
+                            if isinstance(specs, dict):
+                                spec_text = " • ".join([f"{k}: {v}" for k, v in specs.items()])
+                            elif isinstance(specs, list):
+                                spec_text = " • ".join(str(s) for s in specs)
+                            else:
+                                spec_text = str(specs)
                             st.caption(spec_text or "Стандартная комплектация")
 
-                            features = car.get("features", [])
+                            features = car.get("features") or car.get("options") or []
                             if features:
                                 with st.expander("Опции и комплектация"):
                                     for feat in features:
@@ -359,16 +400,17 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
 
 # --- VIEW 3: НОРМАТИВНАЯ БАЗА (ГК/НК РФ) ---
 elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
-    st.header("📜 Нормативно-правовая база (ГК РФ / НК РФ)")
-    st.caption("Формат: Единый файл `data/legal/laws_gk_nk.jsonl` | Идентификаторы: tax_{id} (НК РФ), civics_{id} (ГК РФ)")
+    st.header("📜 Нормативно-правовая база (ГК РФ / НК РФ / КоАП РФ / Лизинг)")
+    st.caption("Формат: Единый файл `data/legal/laws_gk_nk.jsonl` | Шаблон ID: `{prefix}_{хэш title}_{хэш details}`")
 
     if not legal_data:
         st.info("Нормативные акты будут загружены в `data/legal/laws_gk_nk.jsonl` коллектором `python runner.py --collector laws`.")
     else:
         # Фильтры по разделу и категории
         col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+        all_secs = sorted(list(set(d.get("section", "Общее") for d in legal_data if d.get("section"))))
         with col_f1:
-            selected_section = st.selectbox("Раздел законодательства:", ["Все разделы", "НК РФ", "ГК РФ"])
+            selected_section = st.selectbox("Раздел законодательства:", ["Все разделы"] + all_secs)
         with col_f2:
             all_cats = sorted(list(set(d.get("category", "") for d in legal_data if d.get("category"))))
             selected_category = st.selectbox("Категория (тема):", ["Все категории"] + all_cats)
@@ -414,6 +456,47 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                 st.write(f"**Реквизиты:** {doc.get('details', 'Реквизиты отсутствуют')}")
                 st.divider()
                 st.markdown(doc.get("body", "")[:2500] + ("..." if len(doc.get("body", "")) > 2500 else ""))
+
+
+# --- VIEW 3.5: ПРАВИЛА ДОРОЖНОГО ДВИЖЕНИЯ (ПДД РФ) ---
+elif selected_view == "🚦 Правила дорожного движения (ПДД РФ)":
+    st.header("🚦 Правила дорожного движения РФ (ПДД РФ)")
+    st.caption("Источник: ГИБДД РФ PDF (`Pravila_dorozhnogo_dvizheniya.pdf`) | Чанкинг: По абзацам / пунктам")
+
+    if not pdd_data:
+        st.warning("Файл ПДД не найден в `data/pdd/pdd_rules_rag.json`. Запустите коллектор `python runner.py --collector pdd`.")
+    else:
+        col_p1, col_p2 = st.columns([2, 1])
+        with col_p1:
+            sections_list = ["Все разделы"] + sorted(list(set(p.get("section_title", "ПДД") for p in pdd_data)))
+            selected_pdd_sec = st.selectbox("Раздел ПДД:", sections_list)
+        with col_p2:
+            st.metric("Всего пунктов в базе", len(pdd_data), delta="Абзацный чанкинг")
+
+        pdd_filter = pdd_data if selected_pdd_sec == "Все разделы" else [p for p in pdd_data if p.get("section_title") == selected_pdd_sec]
+
+        search_pdd = st.text_input("Поиск по пункту ПДД или теме (скорость, обгон, ДТП, штрафы):", "")
+        if search_pdd.strip():
+            sq = search_pdd.lower()
+            pdd_filter = [
+                p for p in pdd_filter
+                if sq in p.get("paragraph_text", "").lower()
+                or sq in p.get("clause_number", "").lower()
+                or sq in p.get("topic", "").lower()
+            ]
+
+        st.write(f"Найдено пунктов: **{len(pdd_filter)}**")
+
+        for item in pdd_filter[:25]:
+            sec_name = item.get("section_title", "ПДД РФ")
+            clause_no = item.get("clause_number", "")
+            topic = item.get("topic", sec_name)
+            text = item.get("paragraph_text", "")
+
+            with st.container(border=True):
+                st.markdown(f"**🚦 {sec_name} | Пункт {clause_no}** — *{topic}*")
+                st.write(text)
+
 
 
 # --- VIEW 4: СУДЕБНАЯ ПРАКТИКА ВС РФ ---
@@ -473,18 +556,38 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
         "• **Сервер:** Локальный ПК (Windows 10 Pro / Home)\n"
         "• **Среда разработки:** PyCharm Community / Professional\n"
         "• **Фоновый запуск:** Windows Task Scheduler (`schtasks`) или Docker / WSL2\n"
-        "• **Хранилище законов:** Единый файл `data/legal/laws_gk_nk.jsonl`"
+        "• **Хранилище законов:** Единый файл `data/legal/laws_gk_nk.jsonl` (14 целевых актов)\n"
+        "• **Правила дорожного движения:** Абзацный чанкинг `data/pdd/pdd_rules_rag.json`"
     )
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.metric("Автопарк raskatof.ru", f"{len(cars_data)} авто", delta="Раз в неделю")
+        st.metric("Автопарк raskatof", f"{len(cars_data)} авто", delta="Раз в неделю")
     with col2:
         st.metric("Новости авторынка", f"{len(news_data)} статей", delta="Раз в неделю")
     with col3:
-        st.metric("Практика ВС РФ", f"{len(court_data)} актов", delta="Раз в месяц")
+        st.metric("ПДД РФ (абзацы)", f"{len(pdd_data)} пунктов", delta="По абзацам")
     with col4:
-        st.metric("Законы (ГК / НК)", f"{len(legal_data)} актов", delta="JSONL файл")
+        st.metric("Практика ВС РФ", f"{len(court_data)} актов", delta="Раз в месяц")
+    with col5:
+        st.metric("Законы (ГК/НК/КоАП)", f"{len(legal_data)} актов", delta="JSONL")
+
+    st.subheader("⚡ Управление индексами ChromaDB")
+    col_act1, col_act2 = st.columns(2)
+    with col_act1:
+        if st.button("🔄 Переиндексировать только (Машины + Новости)", use_container_width=True, type="primary", key="btn_partial_reindex"):
+            with st.spinner("Быстрая переиндексация автопарка и новостей..."):
+                from rag_pipeline.indexer import ChromaRAGIndexer
+                res = ChromaRAGIndexer().index_partial(["car_catalog", "auto_news"], verbose=False)
+                st.success(f"Быстро обновлено {res['total_chunks']} чанков за {res['duration_sec']} с!")
+                st.rerun()
+    with col_act2:
+        if st.button("⚡ Полная переиндексация всех 5 коллекций", use_container_width=True, key="btn_full_reindex"):
+            with st.spinner("Индексация законов, решений ВС, каталога, новостей и ПДД..."):
+                from rag_pipeline.indexer import ChromaRAGIndexer
+                res = ChromaRAGIndexer().index_all(verbose=False)
+                st.success(f"Полная база переиндексирована: {res['total_chunks']} чанков, {res['parent_docs_count']} документов!")
+                st.rerun()
 
     st.divider()
 
@@ -497,6 +600,7 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
         "RAG ChromaDB Indexer (rag_indexer.log)": LOGS_DIR / "rag_indexer.log",
         "Laws Collector Detailed (laws_collector_detailed.log)": LOGS_DIR / "laws_collector_detailed.log",
         "Cars raskatof.ru Collector (raskatof_cars.log)": LOGS_DIR / "raskatof_cars.log",
+        "PDD Rules Collector (pdd_rules.log)": LOGS_DIR / "pdd_rules.log",
         "Supreme Court Collector (vsrf_court.log)": LOGS_DIR / "vsrf_court.log",
         "News Collector (auto_news.log)": LOGS_DIR / "auto_news.log"
     }
@@ -534,15 +638,15 @@ elif selected_view == "⚙️ Статус сбора и сервер (Windows 1
     playwright install chromium
 
     # 3. Выполнить переиндексацию ChromaDB (с подробным консольным выводом):
-    reindex_rag.bat
-    # или
-    python reindex_rag.py
+    python reindex_rag.py --partial             # Быстрая переиндексация (только авто + новости)
+    python reindex_rag.py                       # Полная переиндексация всех 5 коллекций
 
     # 4. Запустить нужный коллектор:
     python rag_collectors/runner.py --collector cars     # Ассортимент машин raskatof.ru
     python rag_collectors/runner.py --collector news     # Автоновости
+    python rag_collectors/runner.py --collector pdd      # Правила дорожного движения РФ (ГИБДД PDF)
     python rag_collectors/runner.py --collector vsrf     # Судебная практика ВС РФ
-    python rag_collectors/runner.py --collector laws     # ГК/НК РФ в единый JSONL
+    python rag_collectors/runner.py --collector laws     # ГК/НК/КоАП РФ в единый JSONL
     ```
     """)
 

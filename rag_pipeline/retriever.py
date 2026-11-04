@@ -15,6 +15,7 @@ from rag_pipeline.config import (
     COLLECTION_COURT,
     COLLECTION_LAWS,
     COLLECTION_NEWS,
+    COLLECTION_PDD,
     PRIORITY_HIGH_BOOST,
     PRIORITY_MEDIUM_BOOST,
     TOP_K_RERANK,
@@ -49,12 +50,19 @@ class QueryRouter:
         "стать", "гк рф", "нк рф", "закон", "кодекс", "договор", "лизин",
         "финансов аренд", "выкуп", "раскат", "налог", "ндс", "амортизац",
         "неустойк", "убытк", "залог", "обязательств", "правовой", "юрист",
-        "расторжени", "собственност", "штраф"
+        "расторжени", "собственност", "штраф", "коап", "осаго", "регистрац"
     ]
 
     NEWS_KEYWORDS = [
         "новост", "утильсбор", "рынок", "динамик", "тенденци", "индексац",
         "осаго", "каско", "цены вырос", "прогноз", "правительств", "автопром"
+    ]
+
+    PDD_KEYWORDS = [
+        "пдд", "правил дорожн движен", "скорост", "обгон", "знак", "разметк",
+        "пешеход", "дтп", "авари", "светофор", "водитель", "лишени",
+        "стоянк", "парковк", "перекрест", "помех справ", "детск кресл",
+        "неисправност", "тормоз", "европротокол", "фары", "техосмотр"
     ]
 
     @classmethod
@@ -66,8 +74,12 @@ class QueryRouter:
         is_court = any(k in q for k in cls.COURT_KEYWORDS)
         is_laws = any(k in q for k in cls.LAWS_KEYWORDS)
         is_news = any(k in q for k in cls.NEWS_KEYWORDS)
+        is_pdd = any(k in q for k in cls.PDD_KEYWORDS)
 
-        if is_cars and not (is_court or is_laws):
+        if is_pdd and not (is_court or is_cars):
+            return [COLLECTION_PDD, COLLECTION_LAWS]
+
+        if is_cars and not (is_court or is_laws or is_pdd):
             return [COLLECTION_CARS]
 
         if is_court and not is_cars:
@@ -76,7 +88,7 @@ class QueryRouter:
         if is_laws and not is_cars:
             return [COLLECTION_LAWS, COLLECTION_COURT]
 
-        if is_news and not (is_laws or is_court):
+        if is_news and not (is_laws or is_court or is_pdd):
             return [COLLECTION_NEWS]
 
         # Комплексный или общий запрос — гибридный опрос
@@ -84,12 +96,14 @@ class QueryRouter:
             target_collections.append(COLLECTION_CARS)
         if is_laws or "договор" in q or "прав" in q:
             target_collections.append(COLLECTION_LAWS)
+        if is_pdd:
+            target_collections.append(COLLECTION_PDD)
         if is_court:
             target_collections.append(COLLECTION_COURT)
         if is_news:
             target_collections.append(COLLECTION_NEWS)
 
-        return target_collections if target_collections else [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_CARS]
+        return target_collections if target_collections else [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_CARS, COLLECTION_PDD]
 
 
 class HybridRetriever:

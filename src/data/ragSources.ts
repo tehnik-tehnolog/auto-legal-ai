@@ -27,22 +27,22 @@ export const RAG_SOURCES: RAGSource[] = [
     schedule: 'Раз в 3 месяца',
     scheduleCron: '0 2 1 1,4,7,10 *',
     ragPurpose: 'Базовые гражданско-правовые нормы договоров лизинга, аренды, залога и обязательств.',
-    collectorName: 'LawsCollector (ГК)',
+    collectorName: 'LawsCollector (ГК/КоАП/Законы)',
     collectorFile: 'collectors/gk_nk_laws.py',
     status: 'ready',
     sampleFile: 'data/legal/laws_gk_nk.jsonl',
     keyFields: ['parent_id', 'source_site', 'section', 'category', 'original_url', 'title', 'details', 'collected_at'],
     sampleContent: `{
-  "parent_id": "civics_9027703",
+  "parent_id": "civics_d396fcf3_82cb62fe",
   "source_site": "docs.cntd.ru",
   "section": "ГК РФ",
-  "category": "Собственность_приватизация_аренда",
+  "category": "Гражданский кодекс РФ",
   "original_url": "https://docs.cntd.ru/document/9027703",
-  "title": "Статья 665 ГК РФ. Договор финансовой аренды",
-  "details": "Гражданский кодекс РФ, Часть 2, Глава 34, Параграф 6",
-  "collected_at": "2026-11-01 23:42:00",
+  "title": "ГРАЖДАНСКИЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ ЧАСТЬ ВТОРАЯ (с изменениями на 9 июня 2026 года)",
+  "details": "Федеральный закон от 26 января 1996 года № 14-ФЗ (Аренда, Лизинг гл. 34)",
+  "collected_at": "2026-11-04 12:00:00",
   "priority_level": "high",
-  "body": "По договору финансовой аренды (договору лизинга) арендодатель обязуется приобрести в собственность указанное арендатором имущество у определенного им продавца и предоставить арендатору это имущество за плату во временное владение и пользование."
+  "body": "Статья 624 ГК РФ: Выкуп арендованного имущества (раскат авто). Статья 642 ГК РФ: Аренда транспортного средства без экипажа. Статья 665 ГК РФ: Финансовая аренда (лизинг автомобилей)..."
 }`
   },
   {
@@ -50,7 +50,7 @@ export const RAG_SOURCES: RAGSource[] = [
     number: 2,
     name: 'Налоговая база (НК РФ)',
     section: 'Налоговый кодекс РФ',
-    volume: 'Входит в общий массив законов',
+    volume: 'Входит в единый JSONL массив 14 законов',
     format: 'Единый JSONL файл (laws_gk_nk.jsonl)',
     schedule: 'Раз в 3 месяца',
     scheduleCron: '0 2 1 1,4,7,10 *',
@@ -61,16 +61,16 @@ export const RAG_SOURCES: RAGSource[] = [
     sampleFile: 'data/legal/laws_gk_nk.jsonl',
     keyFields: ['parent_id', 'source_site', 'section', 'category', 'original_url', 'title', 'details', 'collected_at'],
     sampleContent: `{
-  "parent_id": "tax_1300338665",
+  "parent_id": "tax_9e1b402c_8a5f1109",
   "source_site": "docs.cntd.ru",
   "section": "НК РФ",
-  "category": "Транспортный_налог",
-  "original_url": "https://docs.cntd.ru/document/1300338665",
-  "title": "Об утверждении Порядка списания задолженности, признанной безнадежной к взысканию, и Перечня документов, подтверждающих обстоятельства признания задолженности безнадежной к взысканию (с изменениями на 27 февраля 2026 года)",
-  "details": "Приказ ФНС России от 30 ноября 2022 г. № ЕД-7-8/1131@",
-  "collected_at": "2026-11-01 23:39:50",
+  "category": "Налоговый кодекс РФ",
+  "original_url": "https://docs.cntd.ru/document/901765862",
+  "title": "НАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ ЧАСТЬ ВТОРАЯ (с изменениями на 4 августа 2026 года)",
+  "details": "Федеральный закон от 5 августа 2000 года № 117-ФЗ (Транспортный налог гл. 28, НДС, Прибыль)",
+  "collected_at": "2026-11-04 12:00:00",
   "priority_level": "high",
-  "body": "Порядок регламентирует основания и перечень документов для признания задолженности по транспортному налогу и обязательным платежам безнадежной к взысканию..."
+  "body": "Глава 28 НК РФ регламентирует транспортный налог. Плательщиком транспортного налога признается лицо, на которое зарегистрировано ТС в ГИБДД. Статья 264 НК РФ: учет лизинговых платежей за авто в составе прочих расходов..."
 }`
   },
   {
@@ -172,6 +172,31 @@ export const RAG_SOURCES: RAGSource[] = [
       "is_full_text": true,
       "collected_at": "2026-11-01 05:01:10"
     }
+  }
+]`
+  },
+  {
+    id: 'pdd',
+    number: 6,
+    name: 'Правила дорожного движения (ПДД РФ)',
+    section: 'ГИБДД РФ / ПДД',
+    volume: '19 смысловых разделов (абзацы)',
+    format: 'Абзацный JSON (pdd_rules_rag.json)',
+    schedule: 'По мере изменений ПДД',
+    scheduleCron: '0 4 1 * *',
+    ragPurpose: 'Обязанности водителя, правила перевозки детей, скоростные режимы, фиксация ДТП, перечень неисправностей.',
+    collectorName: 'PDDCollector (ГИБДД PDF)',
+    collectorFile: 'collectors/pdd.py',
+    status: 'ready',
+    sampleFile: 'data/pdd/pdd_rules_rag.json',
+    keyFields: ['section_number', 'section_title', 'clause_number', 'paragraph_text', 'topic'],
+    sampleContent: `[
+  {
+    "section_number": 2,
+    "section_title": "2. Общие обязанности водителей",
+    "clause_number": "2.1.1",
+    "paragraph_text": "Водитель механического ТС обязан иметь при себе: водительское удостоверение, регистрационные документы (СТС), полис ОСАГО...",
+    "topic": "Документы водителя и полис ОСАГО"
   }
 ]`
   }

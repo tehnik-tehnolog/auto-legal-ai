@@ -13,7 +13,15 @@ try:
 except ImportError:
     yaml = None
 
-from rag_pipeline.config import CARS_DIR, COURT_DIR, LEGAL_DIR, LEGAL_JSONL_FILE, NEWS_DIR
+from rag_pipeline.config import (
+    CARS_DIR,
+    COURT_DIR,
+    LEGAL_DIR,
+    LEGAL_JSONL_FILE,
+    NEWS_DIR,
+    PDD_DIR,
+    PDD_RULES_FILE,
+)
 
 
 def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
@@ -248,6 +256,8 @@ class RAGChunker:
     def chunk_cars_catalog() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
         Чанкинг каталога автомобилей raskatof.ru.
+        Поддерживает как schema с 'model', так и 'title'/'name',
+        'specifications' и 'specs', 'leasing_terms' (dict или str).
         Каждая карточка авто является неделимым атомарным чанком.
         """
         child_chunks = []
@@ -263,34 +273,62 @@ class RAGChunker:
 
             for idx, car in enumerate(cars):
                 parent_id = f"car_{idx}"
-                model = car.get("model", "Автомобиль")
-                category = car.get("category", "Эконом")
-                terms = car.get("leasing_terms", {})
-                daily = terms.get("daily_rate", "уточняйте")
-                initial = terms.get("initial_payment", "уточняйте")
-                specs = car.get("specifications", {})
-                features = car.get("features", [])
-                url = car.get("source_url", "https://raskatof.ru/")
+                # Совместимость по названию модели (cars_raskatof.json: model, другие: title/name)
+                model_name = car.get("model") or car.get("title") or car.get("name") or f"Автомобиль #{idx}"
+                category = car.get("category", "Эконом и комфорт класс")
 
-                specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()])
-                features_str = "; ".join(features) if features else "стандарт"
+                # Обработка условий лизинга / раската
+                terms = car.get("leasing_terms") or car.get("leasing_info") or {}
+                if isinstance(terms, dict):
+                    daily = terms.get("daily_rate") or terms.get("daily") or terms.get("rate") or terms.get("terms_text") or "По запросу"
+                    initial = terms.get("initial_payment") or terms.get("initial") or terms.get("first_payment") or "Без первого взноса"
+                elif isinstance(terms, str):
+                    daily = terms
+                    initial = "уточняйте у менеджера"
+                else:
+                    daily = str(car.get("daily_rate", "По запросу"))
+                    initial = str(car.get("initial_payment", "Без первого взноса"))
+
+                # Характеристики: specifications или specs
+                specs = car.get("specifications") or car.get("specs") or {}
+                if isinstance(specs, dict):
+                    specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()])
+                elif isinstance(specs, list):
+                    specs_str = ", ".join(str(s) for s in specs)
+                else:
+                    specs_str = str(specs)
+
+                # Комплектация и опции: features или options
+                features = car.get("features") or car.get("options") or []
+                if isinstance(features, list):
+                    features_str = "; ".join(features) if features else "стандартная комплектация"
+                else:
+                    features_str = str(features)
+
+                url = car.get("source_url") or car.get("url") or "https://raskatof.ru/"
+                updated_at = car.get("updated_at", "")
 
                 formatted_text = (
-                    f"Автомобиль: {model}\n"
+                    f"Автомобиль: {model_name}\n"
                     f"Класс: {category}\n"
                     f"Характеристики: {specs_str}\n"
-                    f"Опции: {features_str}\n"
-                    f"Условия раската/выкупа: аренда {daily}, первый взнос {initial}.\n"
-                    f"Ссылка: {url}"
+                    f"Опции и комплектация: {features_str}\n"
+                    f"Условия раската (выкуп/аренда): аренда {daily}, первый взнос {initial}.\n"
+                    f"Ссылка на авто: {url}"
                 )
 
                 parent_store[parent_id] = {
                     "parent_id": parent_id,
-                    "title": model,
+                    "title": model_name,
+                    "model": model_name,
                     "url": url,
+                    "source_url": url,
                     "daily_rate": daily,
                     "initial_payment": initial,
                     "category": category,
+                    "specifications": specs,
+                    "features": features,
+                    "updated_at": updated_at,
                     "full_text": formatted_text
                 }
 
@@ -300,8 +338,10 @@ class RAGChunker:
                     "text": formatted_text,
                     "metadata": {
                         "parent_id": parent_id,
-                        "title": model,
+                        "title": model_name,
+                        "model": model_name,
                         "url": url,
+                        "source_url": url,
                         "category": category,
                         "daily_rate": daily,
                         "initial_payment": initial,
@@ -314,6 +354,74 @@ class RAGChunker:
             pass
 
         return child_chunks, parent_store
+
+    chunk_car_catalog = chunk_cars_catalog
+    chunk_cars = chunk_cars_catalog
+    chunk_car_catalog_chunks = chunk_cars_catalog
+    chunk_cars_catalog_chunks = chunk_cars_catalog
+
+    @staticmethod
+    def chunk_pdd_rules() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """
+        Чанкинг Правил дорожного движения РФ (ПДД РФ).
+        Абзацный чанкинг (по пунктам 1.1-26.x, обязанностям водителей, допуску ТС).
+        Каждый пункт формирует точный поисковый чанк.
+        """
+        child_chunks = []
+        parent_store = {}
+
+        if not PDD_RULES_FILE.exists():
+            return child_chunks, parent_store
+
+        try:
+            with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
+                rules = json.load(f)
+
+            for idx, rule in enumerate(rules):
+                sec_num = rule.get("section_number", 1)
+                parent_id = f"pdd_{sec_num}_{idx}"
+                sec_title = rule.get("section_title", "ПДД РФ")
+                clause = rule.get("clause_number", f"п.{idx}")
+                para_text = rule.get("paragraph_text", "")
+                topic = rule.get("topic", sec_title)
+                url = "https://гибдд.рф/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf"
+
+                title = f"ПДД РФ | {sec_title} ({clause})"
+
+                parent_store[parent_id] = {
+                    "parent_id": parent_id,
+                    "title": title,
+                    "section_title": sec_title,
+                    "clause_number": clause,
+                    "topic": topic,
+                    "url": url,
+                    "full_text": para_text
+                }
+
+                searchable_text = f"ПДД РФ: {sec_title} | Пункт {clause} ({topic}). {para_text}"
+
+                child_chunks.append({
+                    "id": f"{parent_id}_c0",
+                    "parent_id": parent_id,
+                    "text": searchable_text,
+                    "metadata": {
+                        "parent_id": parent_id,
+                        "title": title,
+                        "section": sec_title,
+                        "clause": clause,
+                        "topic": topic,
+                        "url": url,
+                        "doc_type": "traffic_rules",
+                        "priority_level": "high"
+                    }
+                })
+
+        except Exception:
+            pass
+
+        return child_chunks, parent_store
+
+    chunk_pdd = chunk_pdd_rules
 
     @staticmethod
     def chunk_news_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
