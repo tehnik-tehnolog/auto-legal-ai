@@ -30,80 +30,115 @@ logger.setLevel(logging.INFO)
 class QueryRouter:
     """
     Классификатор намерений пользователя (Query Router).
-    Направляет запрос в специализированные коллекции, предотвращая размывание
-    юридического контекста каталогом машин и наоборот.
+    Решает проблему Chunk Imbalance и ложных срабатываний:
+    - Ищет авто (car_catalog) ТОЛЬКО при прямом указании конкретных марок/моделей
+      или коммерческих ценовых запросов (цена, суточная ставка, каталог, взнос).
+    - При юридических спорах (субаренда, расторжение, возврат ТС, статьи ГК/НК РФ)
+      строго исключает car_catalog и направляет в legal_laws и court_cases.
     """
 
-    CARS_KEYWORDS = [
-        "машин", "автомобил", "модел", "chery", "haval", "geely", "solaris",
-        "цена", "стоимост", "ставк", "суточн", "взнос", "наличи", "ассортимент",
-        "каталог", "взять", "аренд в сутк", "автопарк", "комплектац", "вариатор", "кпп"
+    # Конкретные марки и модели авто (латиница и кириллица)
+    CAR_BRANDS_AND_MODELS = [
+        "ford", "focus", "mondeo", "skoda", "octavia", "rapid", "kodiaq",
+        "kia", "rio", "k5", "optima", "ceed", "cerato", "sportage", "sorento",
+        "chery", "tiggo", "arrizo", "haval", "jolion", "f7", "dargo", "h9",
+        "geely", "monjaro", "coolray", "atlas", "emgrand", "solaris",
+        "hyundai", "creta", "elantra", "sonata", "tucson", "changan", "alsvin",
+        "cs35", "cs55", "uni-v", "uni-k", "omoda", "c5", "s5", "exeed",
+        "lx", "txl", "vx", "rx", "lada", "vesta", "granta", "largus", "niva",
+        "москвич", "belgee", "toyota", "camry", "rav4", "corolla", "volkswagen",
+        "polo", "jetta", "tiguan", "renault", "logan", "duster", "sandero",
+        "nissan", "qashqai", "x-trail", "almera",
+        # Кириллица
+        "форд", "фокус", "мондео", "шкода", "октавия", "рапид", "киа", "рио",
+        "к5", "оптима", "сид", "спортейдж", "чери", "тигго", "тиго", "арризо",
+        "хавал", "хавейл", "джолион", "дарго", "ф7", "джили", "монджаро",
+        "кулрей", "атлас", "эмгранд", "солярис", "хендай", "хёндэ", "крета",
+        "элантра", "туссан", "тусон", "чанган", "омода", "эксид", "лада",
+        "веста", "гранта", "ларгус", "нива", "тойота", "камри", "фольксваген",
+        "поло", "тигуан", "рено", "логан", "дастер", "ниссан", "кашкай"
     ]
 
-    COURT_KEYWORDS = [
-        "суд", "вс рф", "верховн", "дело", "определени", "постановлени",
-        "практик", "спор", "банкрот", "изъяти", "пристав", "арест", "сальдо",
-        "взыскан", "незаконн", "жалоб", "коллеги"
+    # Коммерческие запросы каталога (цены, суточные ставки, комплектации, бронирование)
+    CAR_COMMERCIAL = [
+        "цена", "цены", "цену", "стоимост", "ставк", "суточн", "в сутки",
+        "руб/сут", "первый взнос", "первоначальн", "ежемесячн", "в наличии",
+        "бронирован", "забронироват", "выбрать авто", "подобрать авто",
+        "каталог авто", "комплектац", "вариатор", "кпп", "автомат", "механика",
+        "полный привод", "лошадин", "л.с."
     ]
 
-    LAWS_KEYWORDS = [
-        "стать", "гк рф", "нк рф", "закон", "кодекс", "договор", "лизин",
-        "финансов аренд", "выкуп", "раскат", "налог", "ндс", "амортизац",
-        "неустойк", "убытк", "залог", "обязательств", "правовой", "юрист",
-        "расторжени", "собственност", "штраф", "коап", "осаго", "регистрац"
+    # Юридические сущности (законы, статьи, иски, споры, договоры)
+    LEGAL_INTENT = [
+        "стать", "ст.", "ст ", "гк рф", "нк рф", "коап", "зк рф", "апк", "гпк",
+        "закон", "кодекс", "нормативн", "договор", "расторжен", "расторгнут",
+        "суд", "иск", "исков", "субаренд", "поднаем", "неустойк", "убытк",
+        "залог", "обязательств", "правовой", "юрист", "возврат тс", "изъяти",
+        "взыскан", "ответственност", "банкрот", "пристав", "арбитраж",
+        "претензи", "согласие арендодател", "перенаем", "вина", "сальдо"
+    ]
+
+    COURT_SPECIFIC = [
+        "вс рф", "верховн", "дело №", "определени", "постановлени пленум",
+        "судебн практик", "коллеги по гражданск", "коллеги по экономическ",
+        "судебн акт", "жалоб", "кассацион"
     ]
 
     NEWS_KEYWORDS = [
         "новост", "утильсбор", "рынок", "динамик", "тенденци", "индексац",
-        "осаго", "каско", "цены вырос", "прогноз", "правительств", "автопром"
+        "автопром", "прогноз продаж"
     ]
 
     PDD_KEYWORDS = [
-        "пдд", "правил дорожн движен", "скорост", "обгон", "знак", "разметк",
-        "пешеход", "дтп", "авари", "светофор", "водитель", "лишени",
-        "стоянк", "парковк", "перекрест", "помех справ", "детск кресл",
-        "неисправност", "тормоз", "европротокол", "фары", "техосмотр"
+        "пдд", "правил дорожн", "скорост", "обгон", "знак", "разметк",
+        "пешеход", "дтп", "светофор", "лишени прав", "помех справ",
+        "детск кресл", "неисправност", "тормоз", "европротокол", "фары", "техосмотр"
     ]
 
     @classmethod
     def route(cls, query: str) -> List[str]:
         q = query.lower()
-        target_collections = []
 
-        is_cars = any(k in q for k in cls.CARS_KEYWORDS)
-        is_court = any(k in q for k in cls.COURT_KEYWORDS)
-        is_laws = any(k in q for k in cls.LAWS_KEYWORDS)
-        is_news = any(k in q for k in cls.NEWS_KEYWORDS)
-        is_pdd = any(k in q for k in cls.PDD_KEYWORDS)
+        # Проверяем токены марок авто через границы слов
+        has_brand = any(
+            bool(re.search(rf"\b{re.escape(k)}\b", q)) if len(k) <= 4 else (k in q)
+            for k in cls.CAR_BRANDS_AND_MODELS
+        )
+        has_commercial = any(k in q for k in cls.CAR_COMMERCIAL)
+        has_legal = any(k in q for k in cls.LEGAL_INTENT)
+        has_court_specific = any(k in q for k in cls.COURT_SPECIFIC)
+        has_pdd = any(k in q for k in cls.PDD_KEYWORDS)
+        has_news = any(k in q for k in cls.NEWS_KEYWORDS)
 
-        if is_pdd and not (is_court or is_cars):
+        # 1. ПДД РФ (чистый дорожный регламент)
+        if has_pdd and not (has_court_specific or has_commercial or has_brand):
             return [COLLECTION_PDD, COLLECTION_LAWS]
 
-        if is_cars and not (is_court or is_laws or is_pdd):
+        # 2. Чистый поиск автомобилей (указана марка или коммерческий запрос, без судебных споров)
+        if (has_brand or has_commercial) and not (has_legal or has_court_specific or has_pdd):
             return [COLLECTION_CARS]
 
-        if is_court and not is_cars:
-            return [COLLECTION_COURT, COLLECTION_LAWS]
+        # 3. Юридический вопрос со спецификацией конкретного авто (например: "Условия раската на Chery Tiggo")
+        if (has_brand or has_commercial) and has_legal:
+            return [COLLECTION_CARS, COLLECTION_LAWS]
 
-        if is_laws and not is_cars:
+        # 4. Юридический вопрос (субаренда, расторжение, возврат ТС, статьи ГК/НК РФ)
+        # ВНИМАНИЕ: автопарк (car_catalog) здесь СТРОГО НЕ подключается!
+        if has_legal or has_court_specific:
+            if has_court_specific and not any(k in q for k in ["стать", "гк рф", "нк рф", "кодекс"]):
+                return [COLLECTION_COURT, COLLECTION_LAWS]
             return [COLLECTION_LAWS, COLLECTION_COURT]
 
-        if is_news and not (is_laws or is_court or is_pdd):
+        # 5. Автоновости и макроэкономика
+        if has_news and not (has_legal or has_court_specific):
             return [COLLECTION_NEWS]
 
-        # Комплексный или общий запрос — гибридный опрос
-        if is_cars:
-            target_collections.append(COLLECTION_CARS)
-        if is_laws or "договор" in q or "прав" in q:
-            target_collections.append(COLLECTION_LAWS)
-        if is_pdd:
-            target_collections.append(COLLECTION_PDD)
-        if is_court:
-            target_collections.append(COLLECTION_COURT)
-        if is_news:
-            target_collections.append(COLLECTION_NEWS)
+        # 6. Если в запросе найдена конкретная модель автомобиля
+        if has_brand:
+            return [COLLECTION_CARS]
 
-        return target_collections if target_collections else [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_CARS, COLLECTION_PDD]
+        # Дефолт для общих вопросов по аренде/раскату: нормативная база + практика судов
+        return [COLLECTION_LAWS, COLLECTION_COURT]
 
 
 class HybridRetriever:
@@ -112,7 +147,7 @@ class HybridRetriever:
     1. BM25 (точный лексический поиск по номерам статей и терминам)
     2. Dense Vector (смысловой поиск в ChromaDB)
     3. RRF Слияние + Metadata Boost
-    4. Cross-Encoder / Salience Re-ranking
+    4. Stratified Quota Re-ranking (гарантия квоты статей законов ГК/НК РФ)
     5. Parent-Document обогащение
     """
 
@@ -158,39 +193,109 @@ class HybridRetriever:
 
         return results
 
-    def _rerank_candidates(self, query: str, candidates: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    def _rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Переранжирование (Cross-Encoder / Salience Re-ranking).
-        Оценивает смысловую плотность, совпадение точных юридических сущностей
-        и отсекает бюрократический шум.
+        Оценивает смысловую плотность, совпадение точных юридических сущностей,
+        номеров статей и реквизитов.
         """
         q_lower = query.lower()
-        q_tokens = set(re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{3,}\b', q_lower))
+        q_tokens = set(re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', q_lower))
+
+        # Извлечение номеров статей из запроса (например: 615, 619, 624, 665, 450)
+        article_numbers = set(re.findall(r'\b\d{2,4}\b', q_lower))
+        wants_articles = any(k in q_lower for k in ["стать", "ст.", "гк рф", "нк рф", "кодекс"])
 
         for item in candidates:
             text_lower = item["text"].lower()
             title_lower = item.get("metadata", {}).get("title", "").lower()
+            coll = item.get("collection", "")
 
-            # Лексический бонус за точные совпадения реквизитов (статьи, номера дел)
+            # 1. Лексическое совпадение реквизитов
             token_overlap = sum(1 for t in q_tokens if t in text_lower or t in title_lower)
-            lexical_multiplier = 1.0 + (token_overlap * 0.08)
+            lexical_multiplier = 1.0 + (min(token_overlap, 10) * 0.06)
 
-            # Metadata Boost (лизинг/раскат/выкуп)
+            # 2. Бонус точного совпадения запрашиваемой статьи ГК/НК
+            article_multiplier = 1.0
+            if article_numbers:
+                for num in article_numbers:
+                    if f"статья {num}" in text_lower or f"ст. {num}" in text_lower or f"статье {num}" in text_lower:
+                        article_multiplier += 0.35
+
+            # 3. Приоритетный буст нормативной базы при юридическом вопросе
+            norm_multiplier = 1.0
+            if coll == COLLECTION_LAWS and wants_articles:
+                norm_multiplier = 1.25
+
+            # 4. Metadata Boost (приоритетные нормы)
             priority = item.get("metadata", {}).get("priority_level", "standard")
             boost = PRIORITY_HIGH_BOOST if priority == "high" else (PRIORITY_MEDIUM_BOOST if priority == "medium" else 1.0)
 
-            # Итоговый комбинированный балл реранкера
-            base_score = item.get("rrf_score", 0.5)
-            item["rerank_score"] = round(base_score * boost * lexical_multiplier, 4)
+            # Итоговый комбинированный балл реранкера (RRF базис)
+            base_score = item.get("rrf_score", 0.02)
+            item["rerank_score"] = round(base_score * boost * lexical_multiplier * article_multiplier * norm_multiplier, 4)
 
         # Сортировка по убыванию релевантности
-        reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
+        reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
         return reranked
+
+    def _stratified_selection(self, query: str, ranked_candidates: List[Dict[str, Any]], target_collections: List[str], top_k: int) -> List[Dict[str, Any]]:
+        """
+        Стратифицированный отбор (Stratified Quota Retrieval):
+        Гарантирует, что при юридических запросах статьи ГК/НК РФ (legal_laws)
+        не вытесняются массивной судебной практикой ВС РФ (court_cases).
+        """
+        if COLLECTION_LAWS not in target_collections or COLLECTION_COURT not in target_collections:
+            return ranked_candidates[:top_k]
+
+        q_lower = query.lower()
+        wants_articles = any(k in q_lower for k in ["стать", "ст.", "гк рф", "нк рф", "кодекс", "закон", "норма"])
+        wants_court = any(k in q_lower for k in ["судебн", "вс рф", "верховн", "дело", "определени", "практик"])
+
+        # Определение квоты
+        if wants_articles and not wants_court:
+            min_laws = min(3, top_k - 1)
+            min_court = 1
+        elif wants_court and not wants_articles:
+            min_court = min(3, top_k - 1)
+            min_laws = 1
+        else:
+            # Сбалансированная выдача 50/50: норма права + ее применение в суде
+            min_laws = 2
+            min_court = 2
+
+        laws_items = [c for c in ranked_candidates if c.get("collection") == COLLECTION_LAWS]
+        court_items = [c for c in ranked_candidates if c.get("collection") == COLLECTION_COURT]
+        other_items = [c for c in ranked_candidates if c.get("collection") not in (COLLECTION_LAWS, COLLECTION_COURT)]
+
+        selected = []
+        selected_ids = set()
+
+        # Набираем обязательную квоту из нормативной базы
+        for item in laws_items[:min_laws]:
+            selected.append(item)
+            selected_ids.add(item["id"])
+
+        # Набираем обязательную квоту из судебной практики
+        for item in court_items[:min_court]:
+            selected.append(item)
+            selected_ids.add(item["id"])
+
+        # Дополняем оставшиеся места наивысшими по баллу кандидатами из общего пула
+        for item in ranked_candidates:
+            if len(selected) >= top_k:
+                break
+            if item["id"] not in selected_ids:
+                selected.append(item)
+                selected_ids.add(item["id"])
+
+        # Финальная сортировка отобранных источников по реранк-баллу
+        return sorted(selected, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
 
     def retrieve(self, query: str, top_k: int = TOP_K_RERANK) -> Dict[str, Any]:
         """
         Основной метод выполнения RAG-поиска:
-        Router -> BM25 + Dense -> RRF -> Boost -> Rerank -> Parent Document Enrichment
+        Router -> BM25 + Dense -> RRF -> Boost -> Rerank -> Stratified Quota -> Parent Document Enrichment
         """
         target_collections = QueryRouter.route(query)
         logger.info(f"Query: '{query}' -> Target collections: {target_collections}")
@@ -250,7 +355,10 @@ class HybridRetriever:
 
         # 4. Переранжирование кандидатов
         candidates_list = list(candidates_map.values())
-        top_candidates = self._rerank_candidates(query, candidates_list, top_k=top_k)
+        ranked_candidates = self._rerank_candidates(query, candidates_list)
+
+        # 5. Стратифицированный отбор по квотам (гарантия присутствия статей ГК РФ)
+        top_candidates = self._stratified_selection(query, ranked_candidates, target_collections, top_k=top_k)
 
         # 5. Обогащение родительским контекстом (Parent-Document Resolver)
         enriched_sources = []

@@ -253,7 +253,8 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                     "car_catalog": "🚗 Автопарк raskatof.ru",
                     "legal_laws": "📜 Законы (ГК/НК РФ)",
                     "court_cases": "⚖️ ВС РФ (Судебная практика)",
-                    "auto_news": "📰 Автоновости и рынок"
+                    "auto_news": "📰 Автоновости и рынок",
+                    "traffic_rules": "🚦 ПДД РФ"
                 }
                 badges = [target_labels.get(t, t) for t in msg["targets"]]
                 st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
@@ -267,6 +268,7 @@ if selected_view == "💬 RAG Ассистент (Чат)":
 
             if msg.get("sources"):
                 with st.expander(f"📚 Использованные первоисточники ({len(msg['sources'])} документов)"):
+                    st.caption("ℹ️ *RRF Score в диапазоне 0.030–0.055 отражает топ-ранг одновременно в семантическом (Dense) и лексическом (BM25) поиске.*")
                     for s in msg["sources"]:
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
@@ -275,7 +277,7 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                                 st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
                             st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
                         with col_b:
-                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}")
+                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}", help="RRF Score (Reciprocal Rank Fusion). 0.030–0.055 — высший показатель совпадения в Dense + BM25.")
                         st.divider()
 
     if prompt := st.chat_input("Введите ваш вопрос..."):
@@ -284,7 +286,7 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Поиск по разделенным коллекциям (Router + BM25 + Dense + Reranker)..."):
+            with st.spinner("Поиск по разделенным коллекциям (Router + BM25 + Dense + Stratified Reranker)..."):
                 try:
                     from rag_pipeline.generator import RAGAssistant
                     assistant = RAGAssistant()
@@ -307,7 +309,8 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                     "car_catalog": "🚗 Автопарк raskatof.ru",
                     "legal_laws": "📜 Законы (ГК/НК РФ)",
                     "court_cases": "⚖️ ВС РФ (Судебная практика)",
-                    "auto_news": "📰 Автоновости и рынок"
+                    "auto_news": "📰 Автоновости и рынок",
+                    "traffic_rules": "🚦 ПДД РФ"
                 }
                 badges = [target_labels.get(t, t) for t in targets]
                 st.caption(f"🎯 **Коллекции поиска (Query Router):** {' • '.join(badges)}")
@@ -321,6 +324,7 @@ if selected_view == "💬 RAG Ассистент (Чат)":
 
             if sources:
                 with st.expander(f"📚 Использованные первоисточники ({len(sources)} документов)"):
+                    st.caption("ℹ️ *RRF Score в диапазоне 0.030–0.055 отражает топ-ранг одновременно в семантическом (Dense) и лексическом (BM25) поиске.*")
                     for s in sources:
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
@@ -329,7 +333,7 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                                 st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
                             st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
                         with col_b:
-                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}")
+                            st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}", help="RRF Score (Reciprocal Rank Fusion). 0.030–0.055 — высший показатель совпадения в Dense + BM25.")
                         st.divider()
 
             st.session_state.messages.append({

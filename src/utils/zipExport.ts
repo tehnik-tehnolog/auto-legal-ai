@@ -909,19 +909,30 @@ from rag_pipeline.config import ALL_COLLECTIONS, CHROMA_DIR, COLLECTION_CARS, CO
 from rag_pipeline.indexer import ChromaRAGIndexer, SimpleBM25Index
 
 class QueryRouter:
+    CAR_BRANDS = ["ford", "focus", "skoda", "octavia", "kia", "rio", "k5", "chery", "tiggo", "haval", "jolion", "geely", "monjaro", "coolray", "solaris", "hyundai", "changan", "omoda", "exeed", "lada", "vesta", "granta", "москвич", "belgee", "камри", "рио", "солярис", "тигго", "джолион", "монджаро", "кулрей", "шкода", "октавия", "форд", "фокус", "киа", "хендай", "хавал", "чери"]
+    CAR_COMMERCIAL = ["цена", "цены", "стоимост", "ставк", "суточн", "в сутки", "первый взнос", "наличи", "забронироват", "каталог авто", "комплектац"]
+    LEGAL_INTENT = ["стать", "ст.", "гк", "нк", "коап", "закон", "кодекс", "договор", "расторжен", "суд", "иск", "субаренд", "поднаем", "неустойк", "убытк", "залог", "обязательств", "возврат тс", "изъяти", "взыскан", "банкрот"]
+
     @staticmethod
     def route_query(query: str) -> List[str]:
         q = query.lower()
-        targets = []
-        is_car = any(w in q for w in ["машин", "авто", "каталог", "chery", "haval", "geely", "лада", "granta", "аренд", "сутки", "взнос", "наличи", "выкуп", "раскат"])
-        is_law = any(w in q for w in ["гк", "нк", "стать", "закон", "налог", "ндс", "прибыль", "договор", "обязательств", "арендодател", "арендатор", "неустойк", "расторжен", "банкрот"])
-        is_court = any(w in q for w in ["суд", "верховн", "вс рф", "определен", "постановлен", "практик", "дело №", "спор", "взыскан", "изъяти"])
-        is_news = any(w in q for w in ["новост", "утильсбор", "рынок", "ставк", "индексац", "2024", "2025", "2026", "китайск"])
-        if is_car: targets.append(COLLECTION_CARS)
-        if is_law: targets.append(COLLECTION_LAWS)
-        if is_court: targets.append(COLLECTION_COURT)
-        if is_news: targets.append(COLLECTION_NEWS)
-        return targets if targets else ALL_COLLECTIONS
+        has_brand = any(b in q for b in QueryRouter.CAR_BRANDS)
+        has_commercial = any(c in q for c in QueryRouter.CAR_COMMERCIAL)
+        has_legal = any(l in q for l in QueryRouter.LEGAL_INTENT)
+        has_court = any(w in q for w in ["вс рф", "верховн", "дело №", "определен", "постановлен", "практик"])
+        has_news = any(w in q for w in ["новост", "утильсбор", "рынок", "динамик", "тенденци"])
+
+        if (has_brand or has_commercial) and not (has_legal or has_court):
+            return [COLLECTION_CARS]
+        if (has_brand or has_commercial) and has_legal:
+            return [COLLECTION_CARS, COLLECTION_LAWS]
+        if has_legal or has_court:
+            return [COLLECTION_LAWS, COLLECTION_COURT]
+        if has_news:
+            return [COLLECTION_NEWS]
+        if has_brand:
+            return [COLLECTION_CARS]
+        return [COLLECTION_LAWS, COLLECTION_COURT]
 
 class HybridRetriever:
     def __init__(self):

@@ -196,7 +196,11 @@ class RAGChunker:
     @staticmethod
     def chunk_court_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг судебной практики ВС РФ.
+        Чанкинг судебной практики ВС РФ с фильтрацией бюрократического шума:
+        1. Удаление «шапок» судов, ФИО судей/секретарей и процедурного протокола.
+        2. Отсечение непрофильных сфер права (чисто земельные споры по ЗК РФ, жилье, уголовные дела).
+        3. Вырезка только мотивировочных и резолютивных частей (правовые позиции коллегий).
+        4. Добавление тегов категорий в метаданные ChromaDB для точечного поиска.
         """
         child_chunks = []
         parent_store = {}
@@ -204,6 +208,70 @@ class RAGChunker:
         court_file = COURT_DIR / "vsrf_court_docs_rag.json"
         if not court_file.exists():
             return child_chunks, parent_store
+
+        # Регулярные выражения процедурного шума
+        procedural_noise_pattern = re.compile(
+            r'^(?:'
+            r'в\s+составе\s+председательствующ|'
+            r'председательствующего|'
+            r'судей\s+верховного|'
+            r'при\s+секретаре|'
+            r'секретаре\s+судебного|'
+            r'с\s+участием\s+представител|'
+            r'с\s+участием\s+прокурора|'
+            r'протокол\s+вел|'
+            r'по\s+доверенности\s+от|'
+            r'рассмотрела\s+в\s+открытом\s+судебном|'
+            r'рассмотрев\s+в\s+судебном\s+заседании|'
+            r'заслушав\s+доклад\s+судьи|'
+            r'руководствуясь\s+статьями\s+(?:390|291|328|329)|'
+            r'ходатайство\s+об\s+отложении|'
+            r'определил\s+отложить|'
+            r'дело\s+направлено\s+для\s+рассмотрения\s+в\s+суд'
+            r')',
+            re.IGNORECASE
+        )
+
+        irrelevant_land_or_housing_pattern = re.compile(
+            r'(?:земельный\s+участок|земельного\s+участка|ст\.\s*22\s*зк\s*рф|кадастровый\s+номер|'
+            r'межевани|долевое\s+строительство|многоквартирный\s+дом|жилое\s+помещение|приватизация\s+квартиры|'
+            r'расторжение\s+брака|алименты)',
+            re.IGNORECASE
+        )
+
+        automotive_or_movable_pattern = re.compile(
+            r'(?:автомобил|транспортн|лизинг|раскат|выкуп|аренд|субаренд|тс\b|страхов|осаго|каско|'
+            r'дтп|гибдд|штраф|водитель|сальдо|убытк|неустойк|движимо|залог)',
+            re.IGNORECASE
+        )
+
+        # Ключевые маркеры мотивировочной части (суть правовой позиции суда)
+        motivational_markers = [
+            "суд указал", "коллегия пришла к выводу", "коллегия полагает", "коллегия находит",
+            "по смыслу", "в силу статьи", "в силу положений", "в соответствии со стать",
+            "судам следует", "как разъяснено", "позиция верховного суда", "пленум верховного суда",
+            "бремя доказывания", "недействительн", "расторжен", "изъяти", "субаренд", "поднаем",
+            "согласие арендодателя", "лизинг", "выкуп", "транспортн", "автомобил", "убытк",
+            "неустойк", "сальдо", "страхов", "осаго", "каско", "залог", "виндикац",
+            "возврат", "потребител", "зозпп", "штраф", "дтп", "определила:", "постановил:",
+            "взыскать", "отменить судебные акты", "направить на новое рассмотрение"
+        ]
+
+        def get_category_tag(txt: str) -> str:
+            t = txt.lower()
+            if any(k in t for k in ["субаренд", "поднаем", "передача третьим", "без согласия"]):
+                return "Субаренда и передача ТС третьим лицам"
+            if any(k in t for k in ["лизинг", "лизингополучател", "раскат", "выкуп", "ст. 665", "ст. 624"]):
+                return "Лизинг и раскат (выкуп) автомобиля"
+            if any(k in t for k in ["расторжен", "возврат тс", "изъяти", "ст. 619", "ст. 622", "ст. 450"]):
+                return "Расторжение договора и возврат ТС"
+            if any(k in t for k in ["сальдо", "встречных обязательств", "банкрот"]):
+                return "Расчет сальдо и банкротство"
+            if any(k in t for k in ["страхов", "осаго", "каско", "дтп", "ущерб", "страховщик"]):
+                return "Страхование (ОСАГО/КАСКО) и ущерб при ДТП"
+            if any(k in t for k in ["потребител", "зозпп", "недостатк", "гаранти"]):
+                return "Защита прав потребителей"
+            return "Судебная практика по аренде и обязательствам"
 
         try:
             with open(court_file, "r", encoding="utf-8") as f:
@@ -228,27 +296,60 @@ class RAGChunker:
                     "full_text": content
                 }
 
-                clauses = split_text_into_clauses(content, max_chars=500, min_chars=100)
-                for c_idx, clause in enumerate(clauses):
-                    chunk_id = f"{parent_id}_c{c_idx}"
-                    child_chunks.append({
-                        "id": chunk_id,
-                        "parent_id": parent_id,
-                        "text": clause,
-                        "metadata": {
-                            "parent_id": parent_id,
-                            "title": title,
-                            "case_number": case_num,
-                            "date": date,
-                            "url": url,
-                            "doc_type": "court_decision",
-                            "priority_level": "high",  # Практика ВС РФ всегда имеет высокий приоритет
-                            "chunk_index": c_idx
-                        }
-                    })
+                # Разбиение на смысловые пункты с отсечением бюрократического шума
+                raw_clauses = split_text_into_clauses(content, max_chars=480, min_chars=90)
+                kept_idx = 0
 
-        except Exception:
-            pass
+                for clause in raw_clauses:
+                    clause_clean = clause.strip()
+                    if len(clause_clean) < 80:
+                        continue
+
+                    # 1. Отсекаем «шапки» и процессуальный шум
+                    if procedural_noise_pattern.search(clause_clean):
+                        continue
+
+                    # 2. Отсекаем непрофильные споры (земля / долевое жилье без авто/лизинга)
+                    if irrelevant_land_or_housing_pattern.search(clause_clean) and not automotive_or_movable_pattern.search(clause_clean):
+                        continue
+
+                    # 3. Проверяем мотивировочную / смысловую ценность
+                    clause_lower = clause_clean.lower()
+                    has_motivational = any(m in clause_lower for m in motivational_markers)
+                    is_procedural_history_only = (
+                        ("обратился в суд" in clause_lower or "решением суда от" in clause_lower)
+                        and not has_motivational
+                    )
+                    if is_procedural_history_only:
+                        continue
+
+                    # 4. Если абзац содержит правовую позицию или вывод суда — сохраняем с категорией
+                    if has_motivational or automotive_or_movable_pattern.search(clause_clean):
+                        cat_tag = get_category_tag(clause_clean)
+                        chunk_id = f"{parent_id}_c{kept_idx}"
+                        searchable_text = f"Судебная практика ВС РФ | {title} (Дело {case_num}, {cat_tag}). {clause_clean}"
+
+                        child_chunks.append({
+                            "id": chunk_id,
+                            "parent_id": parent_id,
+                            "text": searchable_text,
+                            "metadata": {
+                                "parent_id": parent_id,
+                                "title": title,
+                                "case_number": case_num,
+                                "date": date,
+                                "url": url,
+                                "category": cat_tag,
+                                "category_tag": cat_tag,
+                                "doc_type": "court_decision",
+                                "priority_level": "high",  # Практика ВС РФ имеет высокий авторитет
+                                "chunk_index": kept_idx
+                            }
+                        })
+                        kept_idx += 1
+
+        except Exception as e:
+            logger.error(f"Ошибка при чанкинге судебных актов ВС РФ: {e}")
 
         return child_chunks, parent_store
 
