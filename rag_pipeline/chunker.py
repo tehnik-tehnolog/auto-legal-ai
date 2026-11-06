@@ -16,10 +16,13 @@ except ImportError:
 from rag_pipeline.config import (
     CARS_DIR,
     COURT_DIR,
+    LEGAL_CHAPTERS_FILE,
     LEGAL_DIR,
     LEGAL_JSONL_FILE,
     NEWS_DIR,
+    PDD_CHAPTERS_FILE,
     PDD_DIR,
+    PDD_PDF_URL,
     PDD_RULES_FILE,
 )
 
@@ -65,33 +68,43 @@ class RAGChunker:
         child_chunks = []
         parent_store = {}
 
-        # 1. Чтение из единого JSONL файла
-        if LEGAL_JSONL_FILE.exists():
+        # 1. Чтение из структурированного файла по статьям и главам (LEGAL_CHAPTERS_FILE)
+        target_file = LEGAL_CHAPTERS_FILE if LEGAL_CHAPTERS_FILE.exists() else LEGAL_JSONL_FILE
+        if target_file.exists():
             try:
-                with open(LEGAL_JSONL_FILE, "r", encoding="utf-8") as f:
+                with open(target_file, "r", encoding="utf-8") as f:
                     for line_idx, line in enumerate(f):
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             doc = json.loads(line)
-                            parent_id = doc.get("parent_id") or f"doc_{line_idx}"
-                            title = doc.get("title", f"Документ #{line_idx}")
-                            section = doc.get("section", "Нормативная база")
-                            category = doc.get("category", "Законодательство")
-                            url = doc.get("original_url", doc.get("url", "https://docs.cntd.ru"))
+                            parent_id = doc.get("parent_id") or doc.get("doc_id") or f"doc_{line_idx}"
+                            code = doc.get("code") or ("НК РФ" if "tax" in parent_id or "налог" in doc.get("category", "").lower() else "ГК РФ")
+                            chapter_num = doc.get("chapter_number", "")
+                            art_num = doc.get("article_number", "")
+                            title = doc.get("title", f"{code} {art_num}" if art_num else f"Документ #{line_idx}")
+                            section = doc.get("section", code)
+                            category = doc.get("category", "Нормативная база")
+                            local_doc_id = doc.get("local_doc_id", f"legal_{parent_id}")
+                            url = doc.get("url") or f"#doc-legal_{parent_id}"
                             details = doc.get("details", "")
-                            priority = doc.get("priority_level", "standard")
+                            priority = doc.get("priority_level", "high" if any(k in title.lower() for k in ["аренд", "лизинг", "транспорт", "налог", "субаренд"]) else "standard")
                             collected_at = doc.get("collected_at", "")
                             body = doc.get("body", doc.get("full_text", ""))
 
                             # Сохраняем родительский документ со всеми реквизитами
                             parent_store[parent_id] = {
                                 "parent_id": parent_id,
+                                "doc_id": parent_id,
+                                "local_doc_id": local_doc_id,
                                 "source_site": doc.get("source_site", "docs.cntd.ru"),
+                                "code": code,
+                                "chapter_number": chapter_num,
+                                "article_number": art_num,
                                 "section": section,
                                 "category": category,
-                                "original_url": url,
+                                "original_url": doc.get("original_url", doc.get("url", "https://docs.cntd.ru")),
                                 "url": url,
                                 "title": title,
                                 "details": details,
@@ -101,16 +114,20 @@ class RAGChunker:
                             }
 
                             # Извлекаем пункты (small chunks) для точного поиска
-                            clauses = split_text_into_clauses(body, max_chars=450, min_chars=70)
+                            clauses = split_text_into_clauses(body, max_chars=450, min_chars=60)
                             for idx, clause in enumerate(clauses):
                                 chunk_id = f"{parent_id}_c{idx}"
-                                searchable_text = f"{section} | {title} ({category}). {clause}"
+                                searchable_text = f"{code} | {chapter_num} | {title} ({category}). {clause}"
                                 child_chunks.append({
                                     "id": chunk_id,
                                     "parent_id": parent_id,
                                     "text": searchable_text,
                                     "metadata": {
                                         "parent_id": parent_id,
+                                        "local_doc_id": local_doc_id,
+                                        "code": code,
+                                        "chapter_number": chapter_num,
+                                        "article_number": art_num,
                                         "section": section,
                                         "category": category,
                                         "title": title,
@@ -465,60 +482,121 @@ class RAGChunker:
     def chunk_pdd_rules() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
         Чанкинг Правил дорожного движения РФ (ПДД РФ).
-        Абзацный чанкинг (по пунктам 1.1-26.x, обязанностям водителей, допуску ТС).
-        Каждый пункт формирует точный поисковый чанк.
+        Читает структурированные главы (Главы 1–26, Основные положения по допуску ТС,
+        Перечень неисправностей) из data/pdd/pdd_chapters.jsonl.
+        Каждый смысловой пункт/абзац формирует точный поисковый чанк.
         """
         child_chunks = []
         parent_store = {}
 
-        if not PDD_RULES_FILE.exists():
-            return child_chunks, parent_store
+        # 1. Чтение из структурированного JSONL по главам
+        if PDD_CHAPTERS_FILE.exists():
+            try:
+                with open(PDD_CHAPTERS_FILE, "r", encoding="utf-8") as f:
+                    for line_idx, line in enumerate(f):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            doc = json.loads(line)
+                            parent_id = doc.get("parent_id") or doc.get("doc_id") or f"pdd_{line_idx}"
+                            sec_num = doc.get("section_number", line_idx)
+                            ch_num = doc.get("chapter_number", f"Глава {sec_num}")
+                            ch_title = doc.get("chapter_title", "")
+                            title = doc.get("title", f"ПДД РФ: {ch_title}")
+                            category = doc.get("category", "Правила дорожного движения РФ")
+                            local_doc_id = doc.get("local_doc_id", f"pdd_{parent_id}")
+                            url = doc.get("url") or f"#doc-pdd_{parent_id}"
+                            priority = doc.get("priority_level", "high")
+                            body = doc.get("body", doc.get("full_text", ""))
 
-        try:
-            with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
-                rules = json.load(f)
+                            parent_store[parent_id] = {
+                                "parent_id": parent_id,
+                                "doc_id": parent_id,
+                                "local_doc_id": local_doc_id,
+                                "section_number": sec_num,
+                                "chapter_number": ch_num,
+                                "chapter_title": ch_title,
+                                "title": title,
+                                "category": category,
+                                "url": url,
+                                "original_url": doc.get("original_url", PDD_PDF_URL),
+                                "priority_level": priority,
+                                "full_text": body
+                            }
 
-            for idx, rule in enumerate(rules):
-                sec_num = rule.get("section_number", 1)
-                parent_id = f"pdd_{sec_num}_{idx}"
-                sec_title = rule.get("section_title", "ПДД РФ")
-                clause = rule.get("clause_number", f"п.{idx}")
-                para_text = rule.get("paragraph_text", "")
-                topic = rule.get("topic", sec_title)
-                url = "https://гибдд.рф/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf"
+                            clauses = split_text_into_clauses(body, max_chars=450, min_chars=60)
+                            for idx, clause in enumerate(clauses):
+                                chunk_id = f"{parent_id}_c{idx}"
+                                searchable_text = f"ПДД РФ | {ch_title}. {clause}"
+                                child_chunks.append({
+                                    "id": chunk_id,
+                                    "parent_id": parent_id,
+                                    "text": searchable_text,
+                                    "metadata": {
+                                        "parent_id": parent_id,
+                                        "local_doc_id": local_doc_id,
+                                        "section": ch_title,
+                                        "chapter_number": ch_num,
+                                        "chapter_title": ch_title,
+                                        "title": title,
+                                        "url": url,
+                                        "doc_type": "traffic_rules",
+                                        "priority_level": priority,
+                                        "chunk_index": idx
+                                    }
+                                })
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
-                title = f"ПДД РФ | {sec_title} ({clause})"
+        # 2. Резервное чтение из pdd_rules_rag.json при необходимости
+        if not parent_store and PDD_RULES_FILE.exists():
+            try:
+                with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
+                    rules = json.load(f)
 
-                parent_store[parent_id] = {
-                    "parent_id": parent_id,
-                    "title": title,
-                    "section_title": sec_title,
-                    "clause_number": clause,
-                    "topic": topic,
-                    "url": url,
-                    "full_text": para_text
-                }
+                for idx, rule in enumerate(rules):
+                    sec_num = rule.get("section_number", 1)
+                    parent_id = f"pdd_ch{sec_num}"
+                    sec_title = rule.get("section_title", "ПДД РФ")
+                    clause = rule.get("clause_number", f"п.{idx}")
+                    para_text = rule.get("paragraph_text", "")
+                    topic = rule.get("topic", sec_title)
+                    url = f"#doc-pdd_{parent_id}"
+                    title = f"ПДД РФ | {sec_title}"
 
-                searchable_text = f"ПДД РФ: {sec_title} | Пункт {clause} ({topic}). {para_text}"
-
-                child_chunks.append({
-                    "id": f"{parent_id}_c0",
-                    "parent_id": parent_id,
-                    "text": searchable_text,
-                    "metadata": {
+                    parent_store[parent_id] = {
                         "parent_id": parent_id,
                         "title": title,
-                        "section": sec_title,
-                        "clause": clause,
+                        "section_title": sec_title,
+                        "clause_number": clause,
                         "topic": topic,
                         "url": url,
-                        "doc_type": "traffic_rules",
-                        "priority_level": "high"
+                        "full_text": para_text
                     }
-                })
 
-        except Exception:
-            pass
+                    searchable_text = f"ПДД РФ: {sec_title} | Пункт {clause} ({topic}). {para_text}"
+
+                    child_chunks.append({
+                        "id": f"{parent_id}_c0",
+                        "parent_id": parent_id,
+                        "text": searchable_text,
+                        "metadata": {
+                            "parent_id": parent_id,
+                            "title": title,
+                            "section": sec_title,
+                            "clause": clause,
+                            "topic": topic,
+                            "url": url,
+                            "doc_type": "traffic_rules",
+                            "priority_level": "high"
+                        }
+                    })
+
+            except Exception:
+                pass
 
         return child_chunks, parent_store
 

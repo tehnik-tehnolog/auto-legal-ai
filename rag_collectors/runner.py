@@ -117,6 +117,10 @@ async def run_collector(collector_name: str) -> bool:
     from collectors.auto_news import AutoNewsCollector
     from collectors.gk_nk_laws import LawsCollector
     from collectors.pdd import PDDCollector
+async def run_collector(collector_name: str, test_mode: bool = False) -> bool:
+    from collectors.auto_news import AutoNewsCollector
+    from collectors.gk_nk_laws import LawsCollector
+    from collectors.pdd import PDDCollector
     from collectors.raskatof_cars import CarsCollector
     from collectors.vsrf_court import VSRFCourtCollector
 
@@ -139,9 +143,18 @@ async def run_collector(collector_name: str) -> bool:
     for target in targets:
         collector_cls = collectors_map[target]
         collector_instance = collector_cls()
-        stats = await collector_instance.run()
-        if not stats.get("success", False):
-            all_success = False
+        if test_mode and target in ("laws", "pdd"):
+            print(f"\n🔍 [ТЕСТОВЫЙ РЕЖИМ 1 ДОКУМЕНТ] Запуск коллектора '{target}'...")
+            try:
+                res = await collector_instance.collect(test_mode=True)
+                print(f"✅ Тестовый прогон '{target}' успешно выполнен: {res}")
+            except Exception as e:
+                print(f"❌ Ошибка в тестовом режиме '{target}': {e}")
+                all_success = False
+        else:
+            stats = await collector_instance.run()
+            if not stats.get("success", False):
+                all_success = False
 
     return all_success
 
@@ -160,6 +173,11 @@ def main():
         action="store_true",
         help="Показать текущую статистику собранных файлов в базе RAG"
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Тестовый запуск на 1 документе/главе (для быстрой проверки парсеров)"
+    )
 
     args = parser.parse_args()
 
@@ -171,14 +189,15 @@ def main():
         parser.print_help()
         print("\nПримеры использования на сервере:")
         print("  python runner.py --collector cars     # Запуск сбора машин (еженедельно)")
-        print("  python runner.py --collector news     # Запуск сбора новостей (еженедельно)")
-        print("  python runner.py --collector vsrf     # Запуск сбора ВС РФ (ежемесячно)")
-        print("  python runner.py --collector laws     # Запуск сбора законов (раз в 3 мес)")
+        print("  python runner.py --collector laws --test # Экспресс-проверка парсера законов на 1 документе")
+        print("  python runner.py --collector pdd --test  # Экспресс-проверка парсера ПДД на 1 главе")
         print("  python runner.py --status             # Показать объем собранных данных")
+        return
+
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-    success = asyncio.run(run_collector(args.collector))
+    success = asyncio.run(run_collector(args.collector, test_mode=args.test))
     sys.exit(0 if success else 1)
 
 

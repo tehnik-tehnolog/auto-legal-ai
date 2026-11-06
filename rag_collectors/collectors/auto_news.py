@@ -4,8 +4,13 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, List, Set
 
-import requests
-from bs4 import BeautifulSoup
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError:
+    requests = None
+    BeautifulSoup = None
+import urllib.request
 
 from collectors.base import BaseCollector
 from config.settings import HTTP_TIMEOUT, NEWS_DIR, NEWSDATA_API_KEY, USER_AGENT

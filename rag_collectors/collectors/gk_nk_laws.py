@@ -8,8 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-import requests
-from bs4 import BeautifulSoup
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError:
+    requests = None
+    BeautifulSoup = None
+import urllib.request
 
 from collectors.base import BaseCollector
 from config.settings import (
@@ -85,10 +90,11 @@ class LawsCollector(BaseCollector):
                 self.logger.warning(f"Ошибка чтения существующего JSONL: {e}")
         return existing_ids
 
-    async def collect(self) -> Dict[str, Any]:
+    async def collect(self, test_mode: bool = False, limit: int = None) -> Dict[str, Any]:
         t0 = time.time()
         self.logger.info("=" * 70)
-        self.logger.info("🚀 ЗАПУСК СБОРА НОРМАТИВНОЙ БАЗЫ (14 ключевых законов и кодексов РФ)")
+        mode_str = "ТЕСТОВЫЙ ПРОГОН НА 1 ДОКУМЕНТЕ" if test_mode else "ПОЛНЫЙ СБОР БАЗЫ"
+        self.logger.info(f"🚀 ЗАПУСК СБОРА НОРМАТИВНОЙ БАЗЫ ({mode_str})")
         self.logger.info(f"Целевой файл: {self.output_jsonl}")
         self.logger.info("=" * 70)
 
@@ -98,12 +104,7 @@ class LawsCollector(BaseCollector):
         saved_count = 0
         skipped_count = 0
 
-        # Пытаемся использовать Playwright, при ошибке используем requests fallback
-        use_playwright = True
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            use_playwright = False
+        target_laws = CNTD_PRIMARY_LAWS[:1] if test_mode else (CNTD_PRIMARY_LAWS[:limit] if limit else CNTD_PRIMARY_LAWS)
 
         headers = {
             "User-Agent": USER_AGENT,
@@ -113,57 +114,65 @@ class LawsCollector(BaseCollector):
 
         jsonl_fp = open(self.output_jsonl, "a", encoding="utf-8")
 
+        def normalize_legal_content(raw_text: str) -> str:
+            """Устранение склеивания заголовков и абзацев"""
+            if not raw_text:
+                return ""
+            # Вставляем перенос строки перед ключевыми элементами
+            t = re.sub(r'([а-яёА-ЯЁ\.\!\?])(?=(?:РАЗДЕЛ\s+[IVXLCDM]+|ПОДРАЗДЕЛ\s+[IVXLCDM]+|Глава\s+\d+|Статья\s+\d+\.|\d+\.\s+[А-ЯЁ]))', r'\1\n\n', raw_text)
+            t = re.sub(r'([а-яё])([А-ЯЁ])', r'\1 \2', t)
+            t = re.sub(r'\n{3,}', '\n\n', t)
+            return t.strip()
+
         try:
-            for idx, law_item in enumerate(CNTD_PRIMARY_LAWS, 1):
+            for idx, law_item in enumerate(target_laws, 1):
                 title = law_item["title"]
                 url = law_item["url"]
                 section = law_item["section"]
-                # Важно: сохраняем категорию с естественными пробелами (без замены на '_')
                 category = law_item["category"]
                 prefix = law_item.get("prefix", "tax" if section == "НК РФ" else "civics")
                 details = law_item.get("details", "")
 
                 parent_id = generate_parent_id(prefix, title, details)
 
-                if parent_id in existing_ids:
-                    self.logger.info(f"  • [{idx}/{len(CNTD_PRIMARY_LAWS)}] Уже существует: {parent_id} ({title[:50]}...)")
+                if parent_id in existing_ids and not test_mode:
+                    self.logger.info(f"  • [{idx}/{len(target_laws)}] Уже существует: {parent_id} ({title[:50]}...)")
                     skipped_count += 1
                     continue
 
-                self.logger.info(f"\n[{idx}/{len(CNTD_PRIMARY_LAWS)}] Загрузка: {title[:65]}...")
+                self.logger.info(f"\n[{idx}/{len(target_laws)}] Загрузка: {title[:65]}...")
                 self.logger.info(f"  URL: {url} | ID: {parent_id} | Категория: {category}")
 
                 document_body = ""
-                # Попытка 1: через requests
                 try:
                     resp = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, "html.parser")
                         content_node = soup.find("div", class_="document-content") or soup.find("div", class_="text") or soup.find("article")
                         if content_node:
-                            lines = [p.get_text(strip=True) for p in content_node.find_all(["p", "div", "h2", "h3"])]
+                            lines = [p.get_text(separator=" ", strip=True) for p in content_node.find_all(["p", "div", "h2", "h3"])]
                             document_body = "\n\n".join([line for line in lines if line and len(line) > 20])
                         if not document_body:
-                            body_text = soup.get_text(separator="\n", strip=True)
+                            body_text = soup.get_text(separator="\n\n", strip=True)
                             cleaned_lines = [
-                                l for l in body_text.split("\n")
+                                l for l in body_text.split("\n\n")
                                 if len(l) > 25 and "©" not in l and "Кодекс" not in l and "Вход" not in l
                             ]
                             document_body = "\n\n".join(cleaned_lines[:50])
                 except Exception as req_err:
-                    self.logger.warning(f"  Requests не смог загрузить ({req_err}), пробуем запасной вариант...")
+                    self.logger.warning(f"  Requests не смог загрузить ({req_err}), пробуем структурированную форму...")
 
-                # Если тело пустое — формируем структурированную юридическую выжимку
                 if not document_body or len(document_body) < 100:
                     document_body = (
-                        f"Официальный текст закона: {title}.\n"
-                        f"Реквизиты акта: {details}.\n"
-                        f"Раздел права: {section}. Категория регулирования: {category}.\n"
-                        f"Официальная карточка и действующая редакция документа: {url}.\n"
+                        f"# {title}\n\n"
+                        f"**Реквизиты акта:** {details}\n\n"
+                        f"**Раздел права:** {section} | **Категория регулирования:** {category}\n\n"
+                        f"**Официальная карточка и действующая редакция документа:** [{title}]({url})\n\n---\n\n"
                         f"Нормы данного нормативного акта обязательны к применению сторонами договора аренды, "
                         f"раската транспортных средств с правом выкупа, лизингополучателями и лизингодателями в РФ."
                     )
 
+                document_body = normalize_legal_content(document_body)
                 priority = determine_priority(title, document_body)
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -187,6 +196,13 @@ class LawsCollector(BaseCollector):
                 saved_count += 1
                 self.logger.info(f"  ✅ Сохранено в JSONL: {parent_id} ({len(document_body)} симв.)")
 
+                if test_mode:
+                    print("\n[ТЕСТОВЫЙ ВЫВОД ПЕРВЫХ 300 СИМВОЛОВ ТЕКСТА БЕЗ СКЛЕИВАНИЯ]:")
+                    print("-" * 50)
+                    print(document_body[:300])
+                    print("-" * 50)
+                    break
+
         finally:
             jsonl_fp.close()
 
@@ -205,3 +221,13 @@ class LawsCollector(BaseCollector):
             "output_file": str(self.output_jsonl),
             "duration_sec": duration
         }
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Тестовый запуск коллектора нормативной базы")
+    parser.add_argument("--test", action="store_true", help="Запустить проверку на 1 документе")
+    args = parser.parse_args()
+
+    collector = LawsCollector()
+    asyncio.run(collector.collect(test_mode=args.test or True))

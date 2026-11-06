@@ -23,9 +23,11 @@ NEWS_DIR = DATA_DIR / "news"
 PDD_DIR = DATA_DIR / "pdd"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Путь к единому файлу нормативной базы ГК РФ и НК РФ
+# Путь к единому файлу нормативной базы ГК РФ и НК РФ, а также структурированным главам/статьям
 LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
+LEGAL_CHAPTERS_FILE = LEGAL_DIR / "legal_chapters.jsonl"
 PDD_RULES_FILE = PDD_DIR / "pdd_rules_rag.json"
+PDD_CHAPTERS_FILE = PDD_DIR / "pdd_chapters.jsonl"
 PDD_PDF_FILE = PDD_DIR / "Pravila_dorozhnogo_dvizheniya.pdf"
 PDD_PDF_URL = "https://xn--b1aew.xn--p1ai/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf"
 

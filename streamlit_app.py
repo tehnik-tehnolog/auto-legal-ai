@@ -35,7 +35,9 @@ LOGS_DIR = BASE_DIR / "logs"
 
 # Путь к единому файлу нормативной базы и ПДД
 LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
+LEGAL_CHAPTERS_FILE = LEGAL_DIR / "legal_chapters.jsonl"
 PDD_RULES_FILE = PDD_DIR / "pdd_rules_rag.json"
+PDD_CHAPTERS_FILE = PDD_DIR / "pdd_chapters.jsonl"
 
 # Инициализация папок
 for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, PDD_DIR, LOGS_DIR]:
@@ -43,6 +45,37 @@ for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, PDD_DIR, LOGS_DIR]:
 
 
 # --- ФУНКЦИИ ЗАГРУЗКИ ДАННЫХ ---
+@st.cache_data(ttl=60)
+def load_legal_chapters():
+    docs = []
+    target = LEGAL_CHAPTERS_FILE if LEGAL_CHAPTERS_FILE.exists() else LEGAL_JSONL_FILE
+    if target.exists():
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        docs.append(json.loads(line))
+        except Exception as e:
+            st.error(f"Ошибка чтения legal_chapters.jsonl: {e}")
+    if not docs:
+        docs = load_legal_docs()
+    return docs
+
+
+@st.cache_data(ttl=60)
+def load_pdd_chapters():
+    chapters = []
+    if PDD_CHAPTERS_FILE.exists():
+        try:
+            with open(PDD_CHAPTERS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        chapters.append(json.loads(line))
+        except Exception as e:
+            st.error(f"Ошибка чтения pdd_chapters.jsonl: {e}")
+    return chapters
 @st.cache_data(ttl=60)
 def load_pdd_rules():
     if PDD_RULES_FILE.exists():
@@ -160,19 +193,31 @@ with st.sidebar:
     st.title("🚗 Раскат Авто РФ")
     st.caption("База знаний RAG и панель управления")
 
+    nav_options = [
+        "💬 RAG Ассистент (Чат)",
+        "🚙 Каталог авто (raskatof.ru)",
+        "📜 Нормативная база (ГК/НК РФ)",
+        "🚦 Правила дорожного движения (ПДД РФ)",
+        "⚖️ Судебная практика ВС РФ",
+        "📰 Автоновости и рынок",
+        "⚙️ Статус сбора и сервер (Windows 10)",
+    ]
+
+    if "current_nav" not in st.session_state:
+        st.session_state.current_nav = "💬 RAG Ассистент (Чат)"
+
+    try:
+        radio_idx = nav_options.index(st.session_state.current_nav)
+    except ValueError:
+        radio_idx = 0
+
     selected_view = st.radio(
         "Раздел:",
-        [
-            "💬 RAG Ассистент (Чат)",
-            "🚙 Каталог авто (raskatof.ru)",
-            "📜 Нормативная база (ГК/НК РФ)",
-            "🚦 Правила дорожного движения (ПДД РФ)",
-            "⚖️ Судебная практика ВС РФ",
-            "📰 Автоновости и рынок",
-            "⚙️ Статус сбора и сервер (Windows 10)",
-        ],
-        index=0,
+        nav_options,
+        index=radio_idx,
+        key="app_sidebar_radio"
     )
+    st.session_state.current_nav = selected_view
 
     st.divider()
 
@@ -180,15 +225,15 @@ with st.sidebar:
     cars_data = load_cars_catalog()
     court_data = load_court_docs()
     news_data = load_news_docs()
-    legal_data = load_legal_docs()
-    pdd_data = load_pdd_rules()
+    legal_chapters = load_legal_chapters()
+    pdd_chapters = load_pdd_chapters()
 
-    tax_docs_count = sum(1 for d in legal_data if d.get("section") == "НК РФ" or d.get("parent_id", "").startswith("tax_"))
-    civics_docs_count = sum(1 for d in legal_data if d.get("section") == "ГК РФ" or d.get("parent_id", "").startswith("civics_"))
+    tax_docs_count = sum(1 for d in legal_chapters if "НК" in str(d.get("code", "")) or "tax" in str(d.get("parent_id", "")))
+    civics_docs_count = sum(1 for d in legal_chapters if "ГК" in str(d.get("code", "")) or "civics" in str(d.get("parent_id", "")))
 
     st.write(f"• Авто в каталоге: **{len(cars_data)} шт.**")
-    st.write(f"• Законы (JSONL): **{len(legal_data)}** (НК: {tax_docs_count}, ГК: {civics_docs_count})")
-    st.write(f"• ПДД РФ (абзацы): **{len(pdd_data)} пунктов**")
+    st.write(f"• Статей в базе: **{len(legal_chapters)}** (ГК: {civics_docs_count}, НК: {tax_docs_count})")
+    st.write(f"• Глав ПДД РФ: **{len(pdd_chapters)} глав**")
     st.write(f"• Решения ВС РФ: **{len(court_data)} актов**")
     st.write(f"• Новостных статей: **{len(news_data)} шт.**")
 
@@ -269,13 +314,29 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             if msg.get("sources"):
                 with st.expander(f"📚 Использованные первоисточники ({len(msg['sources'])} документов)"):
                     st.caption("ℹ️ *RRF Score в диапазоне 0.030–0.055 отражает топ-ранг одновременно в семантическом (Dense) и лексическом (BM25) поиске.*")
-                    for s in msg["sources"]:
+                    for s_idx, s in enumerate(msg["sources"]):
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
                             st.markdown(f"**[{s['title']}]({s['url']})**")
                             if s.get("case_number"):
                                 st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
                             st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
+
+                            # Кнопка мгновенного перехода в локальный просмотрщик Streamlit
+                            coll = s.get("collection", "")
+                            doc_t = s.get("doc_type", "")
+                            p_id = s.get("parent_id")
+                            if (coll == "legal_laws" or doc_t == "legal_law") and p_id:
+                                if st.button(f"📖 Открыть статью в просмотрщике", key=f"hist_legal_{p_id}_{s_idx}"):
+                                    st.session_state.current_nav = "📜 Нормативная база (ГК/НК РФ)"
+                                    st.session_state.active_legal_doc_id = p_id
+                                    st.rerun()
+                            elif (coll == "traffic_rules" or doc_t == "traffic_rules") and p_id:
+                                if st.button(f"🚦 Открыть главу ПДД в просмотрщике", key=f"hist_pdd_{p_id}_{s_idx}"):
+                                    st.session_state.current_nav = "🚦 Правила дорожного движения (ПДД РФ)"
+                                    st.session_state.active_pdd_doc_id = p_id
+                                    st.rerun()
+
                         with col_b:
                             st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}", help="RRF Score (Reciprocal Rank Fusion). 0.030–0.055 — высший показатель совпадения в Dense + BM25.")
                         st.divider()
@@ -325,13 +386,28 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             if sources:
                 with st.expander(f"📚 Использованные первоисточники ({len(sources)} документов)"):
                     st.caption("ℹ️ *RRF Score в диапазоне 0.030–0.055 отражает топ-ранг одновременно в семантическом (Dense) и лексическом (BM25) поиске.*")
-                    for s in sources:
+                    for s_idx, s in enumerate(sources):
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
                             st.markdown(f"**[{s['title']}]({s['url']})**")
                             if s.get("case_number"):
                                 st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
                             st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
+
+                            coll = s.get("collection", "")
+                            doc_t = s.get("doc_type", "")
+                            p_id = s.get("parent_id")
+                            if (coll == "legal_laws" or doc_t == "legal_law") and p_id:
+                                if st.button(f"📖 Открыть статью в просмотрщике", key=f"new_legal_{p_id}_{s_idx}"):
+                                    st.session_state.current_nav = "📜 Нормативная база (ГК/НК РФ)"
+                                    st.session_state.active_legal_doc_id = p_id
+                                    st.rerun()
+                            elif (coll == "traffic_rules" or doc_t == "traffic_rules") and p_id:
+                                if st.button(f"🚦 Открыть главу ПДД в просмотрщике", key=f"new_pdd_{p_id}_{s_idx}"):
+                                    st.session_state.current_nav = "🚦 Правила дорожного движения (ПДД РФ)"
+                                    st.session_state.active_pdd_doc_id = p_id
+                                    st.rerun()
+
                         with col_b:
                             st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}", help="RRF Score (Reciprocal Rank Fusion). 0.030–0.055 — высший показатель совпадения в Dense + BM25.")
                         st.divider()
@@ -405,101 +481,167 @@ elif selected_view == "🚙 Каталог авто (raskatof.ru)":
 # --- VIEW 3: НОРМАТИВНАЯ БАЗА (ГК/НК РФ) ---
 elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
     st.header("📜 Нормативно-правовая база (ГК РФ / НК РФ / КоАП РФ / Лизинг)")
-    st.caption("Формат: Единый файл `data/legal/laws_gk_nk.jsonl` | Шаблон ID: `{prefix}_{хэш title}_{хэш details}`")
+    st.caption("Структурированное хранение по статьям и главам: `data/legal/legal_chapters.jsonl`")
 
-    if not legal_data:
-        st.info("Нормативные акты будут загружены в `data/legal/laws_gk_nk.jsonl` коллектором `python runner.py --collector laws`.")
+    legal_items = load_legal_chapters()
+
+    if not legal_items:
+        st.info("Нормативные акты будут загружены в `data/legal/legal_chapters.jsonl` коллектором `python runner.py --collector laws`.")
     else:
-        # Фильтры по разделу и категории
+        # Проверка перехода по прямой ссылке из чата
+        active_id = st.session_state.get("active_legal_doc_id")
+        active_doc = next((d for d in legal_items if d.get("parent_id") == active_id or d.get("doc_id") == active_id), None)
+        if active_doc:
+            st.info(f"📌 **Открыта статья по ссылке ассистента:** {active_doc.get('title')}")
+            col_b1, _ = st.columns([1, 4])
+            with col_b1:
+                if st.button("✖️ Сбросить активную ссылку", key="clear_active_legal"):
+                    st.session_state.active_legal_doc_id = None
+                    st.rerun()
+
+        # Фильтры: Кодекс / Закон, Категория, Поиск
         col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
-        all_secs = sorted(list(set(d.get("section", "Общее") for d in legal_data if d.get("section"))))
+        all_codes = sorted(list(set(d.get("code", d.get("section", "ГК РФ")) for d in legal_items if d.get("code") or d.get("section"))))
         with col_f1:
-            selected_section = st.selectbox("Раздел законодательства:", ["Все разделы"] + all_secs)
+            selected_code = st.selectbox("Кодекс / Закон:", ["Все акты"] + all_codes)
         with col_f2:
-            all_cats = sorted(list(set(d.get("category", "") for d in legal_data if d.get("category"))))
-            selected_category = st.selectbox("Категория (тема):", ["Все категории"] + all_cats)
+            all_cats = sorted(list(set(d.get("category", "") for d in legal_items if d.get("category"))))
+            selected_cat = st.selectbox("Категория (тема):", ["Все категории"] + all_cats)
         with col_f3:
-            search_query = st.text_input("Поиск по заголовку, номеру или тексту статьи:", "")
+            search_query = st.text_input("Поиск по номеру статьи, главе или термину (например 615, субаренда, налог):", "")
 
-        filtered_legal = legal_data
-
-        if selected_section != "Все разделы":
-            filtered_legal = [d for d in filtered_legal if d.get("section") == selected_section]
-
-        if selected_category != "Все категории":
-            filtered_legal = [d for d in filtered_legal if d.get("category") == selected_category]
-
+        filtered_docs = legal_items
+        if selected_code != "Все акты":
+            filtered_docs = [d for d in filtered_docs if (d.get("code") == selected_code or d.get("section") == selected_code)]
+        if selected_cat != "Все категории":
+            filtered_docs = [d for d in filtered_docs if d.get("category") == selected_cat]
         if search_query.strip():
             sq = search_query.lower()
-            filtered_legal = [
-                d for d in filtered_legal
+            filtered_docs = [
+                d for d in filtered_docs
                 if sq in d.get("title", "").lower()
-                or sq in d.get("parent_id", "").lower()
-                or sq in d.get("details", "").lower()
+                or sq in d.get("chapter_number", "").lower()
+                or sq in d.get("article_number", "").lower()
                 or sq in d.get("body", "").lower()
+                or sq in d.get("parent_id", "").lower()
             ]
 
-        st.write(f"Найдено документов: **{len(filtered_legal)}** из {len(legal_data)}")
+        st.write(f"Найдено статей в выборке: **{len(filtered_docs)}** из {len(legal_items)}")
 
-        for doc in filtered_legal[:30]:
-            pid = doc.get("parent_id", "doc")
-            sec = doc.get("section", "Закон")
-            cat = doc.get("category", "Общее")
-            title = doc.get("title", "Нормативный акт")
-            p_lvl = doc.get("priority_level", "standard").upper()
+        # Выбор конкретной статьи для детального чтения
+        doc_options = [f"[{d.get('article_number', d.get('parent_id'))}] {d.get('title')}" for d in filtered_docs]
+        default_idx = 0
+        if active_doc and active_doc in filtered_docs:
+            default_idx = filtered_docs.index(active_doc)
 
-            with st.expander(f"📄 [{pid}] {title} ({sec} / {cat})"):
-                c1, c2, c3 = st.columns([1, 1, 1])
-                c1.write(f"**Раздел:** `{sec}`")
-                c1.write(f"**Parent ID:** `{pid}`")
-                c2.write(f"**Категория:** `{cat}`")
-                c2.write(f"**Приоритет в RAG:** `{p_lvl}`")
-                c3.write(f"**Сбор:** `{doc.get('collected_at', 'Не указано')}`")
-                c3.markdown(f"**Первоисточник:** [{doc.get('original_url', '#')}]({doc.get('original_url', '#')})")
+        if doc_options:
+            selected_doc_label = st.selectbox("Выберите статью для детального изучения:", doc_options, index=default_idx)
+            sel_idx = doc_options.index(selected_doc_label)
+            cur_doc = filtered_docs[sel_idx]
 
-                st.write(f"**Реквизиты:** {doc.get('details', 'Реквизиты отсутствуют')}")
+            # Рендеринг карточки статьи в формате Markdown
+            with st.container(border=True):
+                # Локальный HTML-якорь для перехода по ссылкам вида #doc-legal_{parent_id}
+                st.markdown(f'<a id="doc-legal_{cur_doc.get("parent_id")}"></a>', unsafe_allow_html=True)
+
+                col_h1, col_h2 = st.columns([3, 1])
+                with col_h1:
+                    st.subheader(f"📖 {cur_doc.get('title')}")
+                    st.caption(f"📁 {cur_doc.get('code', 'ГК РФ')} | {cur_doc.get('chapter_number', '')} | Тема: **{cur_doc.get('category', 'Законодательство')}**")
+                with col_h2:
+                    p_lvl = cur_doc.get("priority_level", "high").upper()
+                    st.caption(f"Приоритет: `{p_lvl}`")
+                    st.markdown(f"[🌐 Первоисточник (docs.cntd.ru)]({cur_doc.get('original_url', 'https://docs.cntd.ru')})")
+
                 st.divider()
-                st.markdown(doc.get("body", "")[:2500] + ("..." if len(doc.get("body", "")) > 2500 else ""))
+
+                # Основной чистый текст статьи без склеенных слов
+                body_md = cur_doc.get("body", cur_doc.get("full_text", ""))
+                st.markdown(body_md)
+
+                if cur_doc.get("details"):
+                    st.caption(f"Реквизиты: {cur_doc.get('details')}")
+
+        # Список остальных статей в виде аккордеона
+        with st.expander(f"📚 Список всех статей выборки ({len(filtered_docs)} шт.)"):
+            for doc in filtered_docs:
+                p_id = doc.get("parent_id", "doc")
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**{doc.get('title')}** (`{doc.get('chapter_number', '')}`)")
+                    c1.caption(f"Тема: {doc.get('category')} | ID: `{p_id}`")
+                    if c2.button("Показать статью", key=f"btn_show_art_{p_id}"):
+                        st.session_state.active_legal_doc_id = p_id
+                        st.rerun()
 
 
 # --- VIEW 3.5: ПРАВИЛА ДОРОЖНОГО ДВИЖЕНИЯ (ПДД РФ) ---
 elif selected_view == "🚦 Правила дорожного движения (ПДД РФ)":
     st.header("🚦 Правила дорожного движения РФ (ПДД РФ)")
-    st.caption("Источник: ГИБДД РФ PDF (`Pravila_dorozhnogo_dvizheniya.pdf`) | Чанкинг: По абзацам / пунктам")
+    st.caption("Структурированное хранение по главам: `data/pdd/pdd_chapters.jsonl` (Главы 1–26, Допуск ТС, Перечень неисправностей)")
 
-    if not pdd_data:
-        st.warning("Файл ПДД не найден в `data/pdd/pdd_rules_rag.json`. Запустите коллектор `python runner.py --collector pdd`.")
+    pdd_items = load_pdd_chapters()
+
+    if not pdd_items:
+        st.warning("Файл ПДД не найден в `data/pdd/pdd_chapters.jsonl`. Запустите коллектор: `python runner.py --collector pdd`.")
     else:
+        # Проверка перехода по активной ссылке
+        active_pdd_id = st.session_state.get("active_pdd_doc_id")
+        active_ch = next((c for c in pdd_items if c.get("parent_id") == active_pdd_id or c.get("doc_id") == active_pdd_id), None)
+        if active_ch:
+            st.info(f"📌 **Открыта глава ПДД по ссылке ассистента:** {active_ch.get('title')}")
+            col_b1, _ = st.columns([1, 4])
+            with col_b1:
+                if st.button("✖️ Сбросить активную главу", key="clear_active_pdd"):
+                    st.session_state.active_pdd_doc_id = None
+                    st.rerun()
+
+        # Выбор главы
+        ch_options = [f"{c.get('chapter_number', '')}: {c.get('chapter_title', c.get('title', ''))}" for c in pdd_items]
+        def_pdd_idx = 0
+        if active_ch and active_ch in pdd_items:
+            def_pdd_idx = pdd_items.index(active_ch)
+
         col_p1, col_p2 = st.columns([2, 1])
         with col_p1:
-            sections_list = ["Все разделы"] + sorted(list(set(p.get("section_title", "ПДД") for p in pdd_data)))
-            selected_pdd_sec = st.selectbox("Раздел ПДД:", sections_list)
+            selected_ch_label = st.selectbox("Выберите главу или раздел ПДД РФ:", ch_options, index=def_pdd_idx)
         with col_p2:
-            st.metric("Всего пунктов в базе", len(pdd_data), delta="Абзацный чанкинг")
+            st.metric("Глав и разделов", len(pdd_items), delta="Главы 1–26 + Допуск + Неисправности")
 
-        pdd_filter = pdd_data if selected_pdd_sec == "Все разделы" else [p for p in pdd_data if p.get("section_title") == selected_pdd_sec]
+        sel_pdd_idx = ch_options.index(selected_ch_label)
+        cur_ch = pdd_items[sel_pdd_idx]
 
-        search_pdd = st.text_input("Поиск по пункту ПДД или теме (скорость, обгон, ДТП, штрафы):", "")
-        if search_pdd.strip():
-            sq = search_pdd.lower()
-            pdd_filter = [
-                p for p in pdd_filter
-                if sq in p.get("paragraph_text", "").lower()
-                or sq in p.get("clause_number", "").lower()
-                or sq in p.get("topic", "").lower()
-            ]
+        # Фильтр поиска по тексту внутри главы
+        search_kw = st.text_input("Поиск по тексту выбранной главы (например скорость, обгон, тормоз):", "")
 
-        st.write(f"Найдено пунктов: **{len(pdd_filter)}**")
+        with st.container(border=True):
+            st.markdown(f'<a id="doc-pdd_{cur_ch.get("parent_id")}"></a>', unsafe_allow_html=True)
+            st.subheader(f"🚦 {cur_ch.get('title')}")
+            st.caption(f"📁 {cur_ch.get('chapter_number', '')} | Раздел #{cur_ch.get('section_number', '')} | Статус: Действующая редакция РФ")
+            st.divider()
 
-        for item in pdd_filter[:25]:
-            sec_name = item.get("section_title", "ПДД РФ")
-            clause_no = item.get("clause_number", "")
-            topic = item.get("topic", sec_name)
-            text = item.get("paragraph_text", "")
+            ch_body = cur_ch.get("body", cur_ch.get("full_text", ""))
+            if search_kw.strip():
+                kw = search_kw.lower()
+                highlighted_lines = []
+                for line in ch_body.split("\n"):
+                    if kw in line.lower():
+                        highlighted_lines.append(f"👉 **{line.strip()}**")
+                    else:
+                        highlighted_lines.append(line)
+                st.markdown("\n".join(highlighted_lines))
+            else:
+                st.markdown(ch_body)
 
-            with st.container(border=True):
-                st.markdown(f"**🚦 {sec_name} | Пункт {clause_no}** — *{topic}*")
-                st.write(text)
+        # Полный каталог всех 28 глав в свернутом виде
+        with st.expander(f"📑 Оглавление Правил дорожного движения ({len(pdd_items)} разделов)"):
+            for ch in pdd_items:
+                ch_pid = ch.get("parent_id", "")
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"**{ch.get('chapter_number', '')}**: {ch.get('chapter_title', '')}")
+                if c2.button("Перейти", key=f"nav_pdd_ch_{ch_pid}"):
+                    st.session_state.active_pdd_doc_id = ch_pid
+                    st.rerun()
 
 
 

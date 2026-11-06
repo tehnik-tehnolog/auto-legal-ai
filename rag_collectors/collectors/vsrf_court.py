@@ -7,9 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-import requests
-from playwright.async_api import async_playwright
-from pypdf import PdfReader
+try:
+    import requests
+    from pypdf import PdfReader
+except ImportError:
+    requests = None
+    PdfReader = None
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    async_playwright = None
+import urllib.request
 
 from collectors.base import BaseCollector
 from config.settings import COURT_DIR, USER_AGENT, VSRF_KEYWORD, VSRF_URL, VSRF_YEARS

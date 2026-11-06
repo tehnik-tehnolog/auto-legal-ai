@@ -4,8 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-import requests
-from bs4 import BeautifulSoup
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError:
+    requests = None
+    BeautifulSoup = None
+import urllib.request
 
 from collectors.base import BaseCollector
 from config.settings import CARS_DIR, HTTP_TIMEOUT, RASKATOF_URL, USER_AGENT
