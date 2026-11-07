@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -88,55 +89,108 @@ class PDDCollector(BaseCollector):
             import pypdf
             reader = pypdf.PdfReader(str(self.output_pdf))
             self.logger.info(f"Извлечение текста из {len(reader.pages)} страниц PDF...")
-            for idx, page in enumerate(reader.pages):
+            for page in reader.pages:
                 page_text = page.extract_text() or ""
-                text += f"\n\n--- СТРАНИЦА {idx + 1} ---\n\n" + page_text
+                text += page_text
         except Exception as e:
             self.logger.warning(f"Ошибка чтения PDF через pypdf ({e}).")
         return text
 
+    @staticmethod
+    def clean_pdd_text(text: str) -> str:
+        """
+        Очистка и форматирование текста ПДД РФ:
+        - Замена конструкции <*> на текст из сноски (курсивом).
+        - Устранение рваных переносов и склейка абзацев.
+        - Выделение слов в кавычках жирным шрифтом (**"..."** / **«...»**).
+        - Выделение подпунктов и пунктов курсивом (*2.1.1(1)*, *2.7.*, *12.1* и т.д.).
+        """
+        if not text:
+            return ""
+
+        # 1. Обработка сносок: ищем блок вида "-------------------------------- <*> Текст сноски"
+        footnote_pattern = r'--------------------------------\s*<\*>\s*([^\n]+)'
+        match_fn = re.search(footnote_pattern, text)
+        if match_fn:
+            fn_text = match_fn.group(1).strip()
+            # Удаляем блок сноски из текста
+            text = re.sub(footnote_pattern, '', text)
+            # Заменяем все маркеры <*> в тексте на текст сноски курсивом
+            text = text.replace('<*>', f'*{fn_text}*')
+
+        # Очищаем остатки линий разделения сносок
+        text = re.sub(r'-{3,}', '', text)
+
+        # 2. Устранение переносов слов через дефис
+        text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
+
+        # 3. Замена одиночных переносов строк на пробелы, сохраняя важные разрывы
+        clean_pattern = r'(?<!\n)\n(?!\n|\s*["\'«„]|\s*[А-ЯЁA-Z]|\s*\d+(?:\.\d+)*\.?)'
+        text = re.sub(clean_pattern, ' ', text)
+
+        # 4. Превращаем оставшиеся структурированные переносы в двойные (\n\n) для абзацев
+        text = re.sub(r'\n+', '\n\n', text)
+
+        # 5. Удаление множественных пробелов и табуляций
+        text = re.sub(r'[ \t]+', ' ', text)
+
+        # 6. Все слова в кавычках — жирным (поддерживаются как двойные кавычки, так и «ёлочки»)
+        text = re.sub(r'"([^"]+)"', r'**"\1"**', text)
+        text = re.sub(r'«([^»]+)»', r'**«\1»**', text)
+
+        # 7. Все подпункты и пункты (например, 2.1.1(1), 2.7., 2.6.1, 12.1) — курсивом
+        item_pattern = r'\b(\d+\.\d+(?:\.\d+)?(?:\(\d+\))?\.?)\b'
+        text = re.sub(item_pattern, r'*\1*', text)
+
+        return text.strip()
+
+
     def _parse_pdd_chapters(self, full_text: str, test_mode: bool = False) -> List[Dict[str, Any]]:
         """
-        Парсинг официального текста ПДД РФ по главам:
-        - Старт строго со слов "ПРАВИЛА ДОРОЖНОГО ДВИЖЕНИЯ РОССИЙСКОЙ ФЕДЕРАЦИИ"
-        - Главы 1–26
-        - Пропуск Приложений 1, 2, 3 (Знаки, Разметка, Сочи)
-        - Продолжение с "ОСНОВНЫЕ ПОЛОЖЕНИЯ ПО ДОПУСКУ ТРАНСПОРТНЫХ СРЕДСТВ К ЭКСПЛУАТАЦИИ..."
-        - "ПЕРЕЧЕНЬ НЕИСПРАВНОСТЕЙ И УСЛОВИЙ, ПРИ КОТОРЫХ ЗАПРЕЩАЕТСЯ ЭКСПЛУАТАЦИЯ ТРАНСПОРТНЫХ СРЕДСТВ"
+        Парсинг ПДД РФ с предварительной очисткой и форматированием.
         """
-        # 1. Поиск точки старта
-        start_marker = "ПРАВИЛА ДОРОЖНОГО ДВИЖЕНИЯ РОССИЙСКОЙ ФЕДЕРАЦИИ"
-        idx_start = full_text.find(start_marker)
-        work_text = full_text[idx_start:] if idx_start != -1 else full_text
-
-        # 2. Вырезание нежелательных приложений 1, 2, 3
-        # Ищем начало Приложения 1
-        m_app1 = re.search(r'Приложение\s+1\s+к\s+Правилам\s+дорожного\s+движения|ДОРОЖНЫЕ\s+ЗНАКИ', work_text, re.IGNORECASE)
-        # Ищем начало Основных положений по допуску
-        m_admit = re.search(r'ОСНОВНЫЕ\s+ПОЛОЖЕНИЯ\s+ПО\s+ДОПУСКУ\s+ТРАНСПОРТНЫХ\s+СРЕДСТВ\s+К\s+ЭКСПЛУАТАЦИИ', work_text, re.IGNORECASE)
-
-        main_rules_text = work_text
-        admit_text = ""
-        if m_app1 and m_admit and m_admit.start() > m_app1.start():
-            # Отрезаем промежуток между Приложением 1 и Основными положениями допуска
-            main_rules_text = work_text[:m_app1.start()]
-            admit_text = work_text[m_admit.start():]
-        elif m_admit:
-            main_rules_text = work_text[:m_admit.start()]
-            admit_text = work_text[m_admit.start():]
-
         chapters = []
 
-        # Шаблон глав 1–26: "1. Общие положения", "2. Общие обязанности водителей" и т.д.
-        chapter_pattern = re.compile(r'(?:^|\n\n)(\d{1,2})\.\s+([А-ЯЁ][^\n]+)(?=\n)', re.MULTILINE)
-        matches = list(chapter_pattern.finditer(main_rules_text))
+        # 1. Поиск маркера старта ПДД
+        start_pattern = re.compile(
+            r'(?:1\.\s+)?Общие\s+положения',
+            re.IGNORECASE | re.DOTALL
+        )
+        match_start = start_pattern.search(full_text)
+
+        if match_start:
+            work_text = full_text[match_start.start():]
+            self.logger.info("✅ Маркер старта ПДД успешно найден в тексте документа.")
+        else:
+            self.logger.warning("⚠️ Точный маркер старта не найден, используем весь текст.")
+            work_text = full_text
+
+        # --- ПРИМЕНЕНИЕ ФУНКЦИИ ОЧИСТКИ И ФОРМАТИРОВАНИЯ ---
+        work_text = self.clean_pdd_text(work_text)
+        # ---------------------------------------------------
+
+        # 2. Находим границу начала Приложений, чтобы отсечь знаки, разметку и Сочи
+        app_cut = re.search(r'Приложение\s+1\s+к\s+Правилам\s+дорожного\s+движения', work_text, re.IGNORECASE)
+        main_body_text = work_text[:app_cut.start()] if app_cut else work_text
+
+        # 3. Регулярное выражение для поиска глав с 1 по 26
+        chapter_pattern = re.compile(
+            r'(?:^|\n)\s*\*?([1-9]|1[0-9]|2[0-6])\.\*?(?![\d])\s+([А-ЯЁ][^\n]+)',
+            re.MULTILINE
+        )
+
+        matches = list(chapter_pattern.finditer(main_body_text))
+        self.logger.info(f"Найдено основных глав ПДД (1-26): {len(matches)}")
 
         for i, match in enumerate(matches):
             sec_num = int(match.group(1))
-            sec_title = f"{sec_num}. {match.group(2).strip()}"
+            sec_title_raw = re.sub(r'\s+', ' ', match.group(2)).strip()
+            sec_title = f"{sec_num}. {sec_title_raw}"
+
             start_pos = match.end()
-            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(main_rules_text)
-            body = main_rules_text[start_pos:end_pos].strip()
+            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(main_body_text)
+
+            body = main_body_text[start_pos:end_pos].strip()
 
             if body:
                 chapters.append({
@@ -149,36 +203,40 @@ class PDDCollector(BaseCollector):
                 if test_mode:
                     break
 
-        # Добавляем разделы допуска ТС и перечня неисправностей, если не в тест-режиме 1 главы
-        if admit_text and not test_mode:
-            # Разделяем на Основные положения и Перечень неисправностей
-            m_faults = re.search(r'ПЕРЕЧЕНЬ\s+НЕИСПРАВНОСТЕЙ\s+И\s+УСЛОВИЙ', admit_text, re.IGNORECASE)
-            if m_faults:
-                admit_main = admit_text[:m_faults.start()].strip()
-                faults_body = admit_text[m_faults.start():].strip()
-                chapters.append({
-                    "section_number": 27,
-                    "chapter_number": "Основные положения",
-                    "chapter_title": "Основные положения по допуску ТС к эксплуатации",
-                    "title": "ПДД РФ: Основные положения по допуску ТС к эксплуатации",
-                    "body": admit_main
-                })
-                chapters.append({
-                    "section_number": 28,
-                    "chapter_number": "Перечень неисправностей",
-                    "chapter_title": "Перечень неисправностей и условий, при которых запрещается эксплуатация ТС",
-                    "title": "ПДД РФ: Перечень неисправностей, запрещающих эксплуатацию ТС",
-                    "body": faults_body
-                })
-            else:
-                chapters.append({
-                    "section_number": 27,
-                    "chapter_number": "Основные положения и неисправности",
-                    "chapter_title": "Основные положения по допуску ТС к эксплуатации и перечень неисправностей",
-                    "title": "ПДД РФ: Допуск ТС к эксплуатации и перечень неисправностей",
-                    "body": admit_text.strip()
-                })
+        # 4. Обрабатываем блоки после приложений (Основные положения и Перечень неисправностей)
+        rest_text = work_text[app_cut.start():] if app_cut else ""
 
+        m_admit = re.search(r'ОСНОВНЫЕ\s+ПОЛОЖЕНИЯ\s+ПО\s+ДОПУСКУ\s+ТРАНСПОРТНЫХ\s+СРЕДСТВ', rest_text, re.IGNORECASE)
+        m_faults = re.search(r'ПЕРЕЧЕНЬ\s+НЕИСПРАВНОСТЕЙ\s+И\s+УСЛОВИЙ', rest_text, re.IGNORECASE)
+
+        if m_admit:
+            admit_start = m_admit.start()
+            admit_end = m_faults.start() if m_faults else len(rest_text)
+            admit_body = rest_text[admit_start:admit_end].strip()
+
+            chapters.append({
+                "section_number": 27,
+                "chapter_number": "Основные положения",
+                "chapter_title": "Основные положения по допуску ТС к эксплуатации",
+                "title": "ПДД РФ: Основные положения по допуску ТС к эксплуатации",
+                "body": admit_body
+            })
+            self.logger.info("✅ Добавлен блок: Основные положения по допуску ТС")
+
+        if m_faults:
+            faults_start = m_faults.start()
+            faults_body = rest_text[faults_start:].strip()
+
+            chapters.append({
+                "section_number": 28,
+                "chapter_number": "Перечень неисправностей",
+                "chapter_title": "Перечень неисправностей и условий, при которых запрещается эксплуатация ТС",
+                "title": "ПДД РФ: Перечень неисправностей, запрещающих эксплуатацию ТС",
+                "body": faults_body
+            })
+            self.logger.info("✅ Добавлен блок: Перечень неисправностей ТС")
+
+        self.logger.info(f"Всего сформировано структурированных объектов: {len(chapters)}")
         return chapters
 
     async def collect(self, test_mode: bool = False) -> Dict[str, Any]:
@@ -198,24 +256,6 @@ class PDDCollector(BaseCollector):
         if extracted_text and len(extracted_text) > 1000:
             chapters = self._parse_pdd_chapters(extracted_text, test_mode=test_mode)
             self.logger.info(f"Сформировано структурированных глав из PDF: {len(chapters)}")
-
-        # Если PDF не удалось прочитать онлайн, используем эталонную базу из build_structured_bases
-        if not chapters:
-            try:
-                from build_structured_bases import PDD_SECTIONS
-            except ImportError:
-                from rag_collectors.build_structured_bases import PDD_SECTIONS
-            target_secs = PDD_SECTIONS[:1] if test_mode else PDD_SECTIONS
-            for idx, sec in enumerate(target_secs, 1):
-                ch_num_match = re.search(r'\d+', sec["chapter_number"])
-                ch_num = int(ch_num_match.group(0)) if ch_num_match else idx
-                chapters.append({
-                    "section_number": ch_num,
-                    "chapter_number": sec["chapter_number"],
-                    "chapter_title": sec["chapter_title"],
-                    "title": f"ПДД РФ: {sec['chapter_title']}",
-                    "body": sec["body"]
-                })
 
         # Сохранение в data/pdd/pdd_chapters.jsonl
         with open(self.output_chapters, "w", encoding="utf-8") as f_jsonl:
