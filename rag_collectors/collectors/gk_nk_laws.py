@@ -9,7 +9,7 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 try:
     import requests
@@ -48,6 +48,22 @@ def determine_priority(title: str, text: str) -> str:
     if any(k in combined for k in MEDIUM_PRIORITY_KEYWORDS):
         return "medium"
     return "standard"
+
+
+def roman_to_int(roman_str: str) -> Optional[int]:
+    """Преобразование римских цифр (I, II, III, IV...) в арабские числа"""
+    roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+    s = roman_str.upper().strip()
+    if not s or not re.match(r'^[IVXLCDM]+$', s):
+        return None
+    res = 0
+    for i in range(len(s)):
+        val = roman_map.get(s[i], 0)
+        if i + 1 < len(s) and val < roman_map.get(s[i + 1], 0):
+            res -= val
+        else:
+            res += val
+    return res if res > 0 else None
 
 
 class LawsCollector(BaseCollector):
@@ -200,13 +216,17 @@ class LawsCollector(BaseCollector):
         """
         Разбиение текста закона на статьи (1 статья = 1 документ).
         Связность: первое сочетание 'Глава N' формирует название и номер главы.
+        Римские цифры глав преобразуются в арабские (Глава III -> Глава 3).
+        Номера статей с нижним подчеркиванием или точками (Статья 50_1, Статья 50.1)
+        корректно обрабатываются при формировании parent_id.
         """
         if not raw_text:
             return []
 
+        # Регулярное выражение с поддержкой римских цифр глав и статей вида 50_1, 50.1, 12.31_1
         pattern = re.compile(
             r'(?P<chapter>(?:Глава|ГЛАВА)\s+(\d+|\b[IVXLCDM]+\b)\.?[ \t]*([^\n]*))|'
-            r'(?P<article>(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)\.?[ \t]*([^\n]*))',
+            r'(?P<article>(?:Статья|СТАТЬЯ)\s+(\d+(?:[._-]\d+)*)\.?[ \t]*([^\n]*))',
             re.MULTILINE
         )
         matches = list(pattern.finditer(raw_text))
@@ -224,23 +244,37 @@ class LawsCollector(BaseCollector):
         if matches:
             for idx, m in enumerate(matches):
                 if m.group("chapter"):
-                    ch_num_val = m.group(2)
-                    ch_title_val = m.group(3).strip()
+                    ch_num_raw = m.group(2).strip()
+                    ch_title_raw = m.group(3).strip()
+
+                    # Преобразование римских цифр глав в арабские
+                    r_val = roman_to_int(ch_num_raw)
+                    ch_num_val = str(r_val) if r_val is not None else ch_num_raw
+
+                    # Очистка названия главы от предшествующей цифры
+                    clean_title = re.sub(r'^(?:[IVXLCDM]+|\d+)\.?\s*', '', ch_title_raw).strip()
+
                     current_ch_num = f"Глава {ch_num_val}"
-                    current_ch_title = f"Глава {ch_num_val}. {ch_title_val}" if ch_title_val else f"Глава {ch_num_val}"
+                    current_ch_title = f"Глава {ch_num_val}. {clean_title}" if clean_title else f"Глава {ch_num_val}"
+
                 elif m.group("article"):
-                    art_num_val = m.group(5)
+                    art_num_val = m.group(5).strip()
                     art_title_val = m.group(6).strip()
                     start_body = m.end()
                     end_body = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_text)
                     raw_body = raw_text[start_body:end_body]
                     cleaned_body = self.clean_legal_text(raw_body)
 
-                    safe_ch = re.sub(r'[^a-zA-Z0-9]', '_', str(current_ch_num.replace("Глава ", "")))
-                    safe_art = re.sub(r'[^a-zA-Z0-9]', '_', str(art_num_val))
+                    # Формирование безопасного ID с поддержкой 50_1, 50.1
+                    ch_num_only = current_ch_num.replace("Глава ", "")
+                    safe_ch = re.sub(r'[^a-zA-Z0-9]', '_', str(ch_num_only)).strip('_')
+                    safe_art = re.sub(r'[^a-zA-Z0-9]', '_', str(art_num_val)).strip('_')
+                    safe_art = re.sub(r'_+', '_', safe_art)
                     parent_id = f"{prefix}_ch{safe_ch}_art{safe_art}"
 
-                    art_title_str = f"Статья {art_num_val}. {art_title_val}" if art_title_val else f"Статья {art_num_val}"
+                    clean_art_title = re.sub(r'^(?:[._-]?\d+)*\.?\s*', '', art_title_val).strip()
+                    display_art_title = clean_art_title if clean_art_title else art_title_val
+                    art_title_str = f"Статья {art_num_val}. {display_art_title}" if display_art_title else f"Статья {art_num_val}"
                     full_title = f"{code}, {current_ch_num}. {art_title_str}"
                     priority = determine_priority(full_title, cleaned_body)
 
@@ -254,7 +288,7 @@ class LawsCollector(BaseCollector):
                         "chapter_number": current_ch_num,
                         "chapter_title": current_ch_title,
                         "article_number": f"Статья {art_num_val}",
-                        "article_title": art_title_val,
+                        "article_title": display_art_title,
                         "title": full_title,
                         "category": category_str,
                         "original_url": orig_url,

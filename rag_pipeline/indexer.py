@@ -38,10 +38,47 @@ _ifh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
 logger.addHandler(_ifh)
 
 
+try:
+    import pymorphy3
+    _morph_analyzer = pymorphy3.MorphAnalyzer()
+except Exception:
+    _morph_analyzer = None
+
+_LEMMA_CACHE: Dict[str, str] = {}
+
+
+def lemmatize_word(word: str) -> str:
+    """Нормализация слова в базовую лемму с использованием pymorphy3 и быстрым кэшированием"""
+    if not _morph_analyzer:
+        return word.lower()
+    w_lower = word.lower()
+    cached = _LEMMA_CACHE.get(w_lower)
+    if cached is not None:
+        return cached
+    try:
+        parsed = _morph_analyzer.parse(w_lower)
+        normal = parsed[0].normal_form if parsed else w_lower
+    except Exception:
+        normal = w_lower
+    if len(_LEMMA_CACHE) < 200000:
+        _LEMMA_CACHE[w_lower] = normal
+    return normal
+
+
+def lemmatize_text(text: str) -> List[str]:
+    """
+    Токенизация и лемматизация текста для BM25 и гибридного поиска:
+    'транспортного налога' -> ['транспортный', 'налог']
+    'гражданской ответственности' -> ['гражданский', 'ответственность']
+    """
+    tokens = re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', text)
+    return [lemmatize_word(t) for t in tokens]
+
+
 class SimpleBM25Index:
     """
-    Легковесный ин-мемори лексический индекс BM25 для быстрого гибридного поиска.
-    Работает без тяжелых зависимостей и сохраняется на диск.
+    Легковесный ин-мемори лексический индекс BM25 с морфологической лемматизацией (pymorphy3).
+    Находит документы независимо от падежей, чисел и окончаний слов.
     """
     def __init__(self):
         self.corpus: List[List[str]] = []
@@ -52,8 +89,7 @@ class SimpleBM25Index:
         self.idf: Dict[str, float] = {}
 
     def tokenize(self, text: str) -> List[str]:
-        tokens = re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', text.lower())
-        return tokens
+        return lemmatize_text(text)
 
     def build(self, chunks: List[Dict[str, Any]]):
         self.doc_ids = []

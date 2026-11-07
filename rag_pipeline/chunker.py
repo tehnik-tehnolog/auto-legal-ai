@@ -27,6 +27,62 @@ from rag_pipeline.config import (
 )
 
 
+def split_article_into_chunks(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
+    """
+    Разбивает юридический документ по статьям (а не по отдельным абзацам).
+    Если статья небольшая (<= max_chars) — сохраняется как единый целый чанк.
+    Если статья большая — дробится на связные фрагменты размером до max_chars
+    с сохранением смысловых границ абзацев и предложений (минимум min_chars).
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if len(cleaned) <= max_chars:
+        return [cleaned]
+
+    paragraphs = [p.strip() for p in cleaned.split("\n\n") if p.strip()]
+    chunks = []
+    current_chunk = ""
+
+    for para in paragraphs:
+        if len(para) > max_chars:
+            # Если текущий накопленный буфер есть — сохраняем
+            if current_chunk:
+                if len(current_chunk) >= min_chars:
+                    chunks.append(current_chunk)
+                current_chunk = ""
+            # Дробим длинный абзац по предложениям
+            sentences = re.split(r'(?<=[.!?])\s+', para)
+            for s in sentences:
+                s = s.strip()
+                if not s:
+                    continue
+                if len(current_chunk) + len(s) + 1 <= max_chars:
+                    current_chunk = f"{current_chunk} {s}".strip() if current_chunk else s
+                else:
+                    if len(current_chunk) >= min_chars:
+                        chunks.append(current_chunk)
+                    current_chunk = s
+        else:
+            if len(current_chunk) + len(para) + 2 <= max_chars:
+                current_chunk = f"{current_chunk}\n\n{para}".strip() if current_chunk else para
+            else:
+                if len(current_chunk) >= min_chars:
+                    chunks.append(current_chunk)
+                current_chunk = para
+
+    if current_chunk:
+        if len(current_chunk) >= min_chars:
+            chunks.append(current_chunk)
+        elif chunks:
+            # Объединяем короткий остаток с предыдущим чанком
+            chunks[-1] = f"{chunks[-1]}\n\n{current_chunk}".strip()
+        else:
+            chunks.append(current_chunk)
+
+    return chunks if chunks else [cleaned[:max_chars]]
+
+
 def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
     """
     Разбивает юридический текст на смысловые пункты и абзацы,
@@ -61,13 +117,9 @@ class RAGChunker:
     @staticmethod
     def chunk_legal_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг нормативной базы (ГК РФ / НК РФ / КоАП РФ).
+        Чанкинг нормативной базы (ГК РФ / НК РФ).
         Читает из единого JSONL файла: data/legal/laws_gk_nk.jsonl
-        с поддержкой префиксов:
-          - tax_ (если section == "НК РФ")
-          - civics_ (если section == "ГК РФ")
-          - exec_ (если section == "КоАП РФ")
-          - other_ (для остальных)
+        с поддержкой префиксов tax_{id} (НК РФ) и civics_{id} (ГК РФ).
         """
         child_chunks = []
         parent_store = {}
@@ -83,40 +135,17 @@ class RAGChunker:
                             continue
                         try:
                             doc = json.loads(line)
-
-                            section = doc.get("section", "ГК РФ")
-
-                            # Определение префикса по вашему правилу
-                            if section == "НК РФ":
-                                prefix = "tax"
-                            elif section == "КоАП РФ":
-                                prefix = "exec"
-                            elif section == "ГК РФ":
-                                prefix = "civics"
-                            else:
-                                prefix = "other"
-
-                            code = doc.get("code") or section
+                            parent_id = doc.get("parent_id") or doc.get("doc_id") or f"doc_{line_idx}"
+                            code = doc.get("code") or ("НК РФ" if "tax" in parent_id or "налог" in doc.get("category", "").lower() else "ГК РФ")
                             chapter_num = doc.get("chapter_number", "")
                             art_num = doc.get("article_number", "")
                             title = doc.get("title", f"{code} {art_num}" if art_num else f"Документ #{line_idx}")
+                            section = doc.get("section", code)
                             category = doc.get("category", "Нормативная база")
-
-                            # Генерация parent_id с учетом префикса, если он отсутствует или требует стандартизации
-                            raw_pid = doc.get("parent_id") or doc.get("doc_id")
-                            if raw_pid and raw_pid.startswith(("tax_", "civics_", "exec_", "other_")):
-                                parent_id = raw_pid
-                            else:
-                                art_num_clean = re.sub(r'[^\d]', '', art_num) or str(line_idx)
-                                ch_num_clean = re.sub(r'[^\d]', '', chapter_num) or "1"
-                                parent_id = f"{prefix}_ch{ch_num_clean}_art{art_num_clean}"
-
                             local_doc_id = doc.get("local_doc_id", f"legal_{parent_id}")
                             url = doc.get("url") or f"#doc-legal_{parent_id}"
                             details = doc.get("details", "")
-                            priority = doc.get("priority_level", "high" if any(k in title.lower() for k in
-                                                                               ["аренд", "лизинг", "транспорт", "налог",
-                                                                                "субаренд"]) else "standard")
+                            priority = doc.get("priority_level", "high" if any(k in title.lower() for k in ["аренд", "лизинг", "транспорт", "налог", "субаренд"]) else "standard")
                             collected_at = doc.get("collected_at", "")
                             body = doc.get("body", doc.get("full_text", ""))
 
@@ -140,8 +169,8 @@ class RAGChunker:
                                 "full_text": body
                             }
 
-                            # Извлекаем пункты (small chunks) для точного поиска
-                            clauses = split_text_into_clauses(body, max_chars=450, min_chars=60)
+                            # Чанкинг по статьям (целиком статья или до 400 символов при больших объемах)
+                            clauses = split_article_into_chunks(body, max_chars=400, min_chars=80)
                             for idx, clause in enumerate(clauses):
                                 chunk_id = f"{parent_id}_c{idx}"
                                 searchable_text = f"{code} | {chapter_num} | {title} ({category}). {clause}"
@@ -193,25 +222,13 @@ class RAGChunker:
                                         meta[k.strip()] = v.strip().strip('"').strip("'")
                             body = parts[2].strip()
 
-                    section = meta.get("section", "ГК РФ")
-                    if "нк" in section.lower() or "налог" in section.lower():
-                        section = "НК РФ"
-                        prefix = "tax"
-                    elif "коап" in section.lower():
-                        section = "КоАП РФ"
-                        prefix = "exec"
-                    elif "гк" in section.lower():
-                        section = "ГК РФ"
-                        prefix = "civics"
-                    else:
-                        prefix = "other"
-
-                    parent_id = f"{prefix}_{file_path.stem}"
+                    parent_id = f"civics_{file_path.stem}" if "665" in file_path.stem else f"tax_{file_path.stem}"
                     title = meta.get("title", file_path.stem)
                     url = meta.get("original_url", "https://docs.cntd.ru")
                     details = meta.get("details", "")
                     priority = meta.get("priority_level", "standard")
                     category = meta.get("category", "Нормативная база")
+                    section = "НК РФ" if "нк" in category.lower() or "налог" in category.lower() else "ГК РФ"
 
                     parent_store[parent_id] = {
                         "parent_id": parent_id,

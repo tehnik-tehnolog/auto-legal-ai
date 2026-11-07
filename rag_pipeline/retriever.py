@@ -21,7 +21,7 @@ from rag_pipeline.config import (
     TOP_K_RERANK,
     TOP_K_RETRIEVAL,
 )
-from rag_pipeline.indexer import ChromaRAGIndexer, SimpleBM25Index
+from rag_pipeline.indexer import ChromaRAGIndexer, SimpleBM25Index, lemmatize_text
 
 logger = logging.getLogger("rag_retriever")
 logger.setLevel(logging.INFO)
@@ -97,58 +97,41 @@ class QueryRouter:
 
     @classmethod
     def route(cls, query: str) -> List[str]:
+        """
+        Маршрутизация запросов по коллекциям базы знаний:
+        - При словах-триггерах на ПДД -> traffic_rules (3) + legal_laws (2)
+        - При словах-триггерах на новости -> auto_news (2) + legal_laws (3)
+        - По умолчанию для всех юридических и общих вопросов -> legal_laws (4) + court_cases (1)
+        (Триггеры на каталог авто отключены по требованию пользователя)
+        """
         q = query.lower()
-
-        # Проверяем токены марок авто через границы слов
-        has_brand = any(
-            bool(re.search(rf"\b{re.escape(k)}\b", q)) if len(k) <= 4 else (k in q)
-            for k in cls.CAR_BRANDS_AND_MODELS
-        )
-        has_commercial = any(k in q for k in cls.CAR_COMMERCIAL)
-        has_legal = any(k in q for k in cls.LEGAL_INTENT)
-        has_court_specific = any(k in q for k in cls.COURT_SPECIFIC)
         has_pdd = any(k in q for k in cls.PDD_KEYWORDS)
         has_news = any(k in q for k in cls.NEWS_KEYWORDS)
 
-        # 1. ПДД РФ (чистый дорожный регламент)
-        if has_pdd and not (has_court_specific or has_commercial or has_brand):
+        # 1. ПДД РФ (квота: 3 ПДД, 2 Нормативная база)
+        if has_pdd:
             return [COLLECTION_PDD, COLLECTION_LAWS]
 
-        # 2. Чистый поиск автомобилей (указана марка или коммерческий запрос, без судебных споров)
-        if (has_brand or has_commercial) and not (has_legal or has_court_specific or has_pdd):
-            return [COLLECTION_CARS]
+        # 2. Автоновости и рынок (квота: 2 новости, 3 Нормативная база)
+        if has_news:
+            return [COLLECTION_NEWS, COLLECTION_LAWS]
 
-        # 3. Юридический вопрос со спецификацией конкретного авто (например: "Условия раската на Chery Tiggo")
-        if (has_brand or has_commercial) and has_legal:
-            return [COLLECTION_CARS, COLLECTION_LAWS]
-
-        # 4. Юридический вопрос (субаренда, расторжение, возврат ТС, статьи ГК/НК РФ)
-        # ВНИМАНИЕ: автопарк (car_catalog) здесь СТРОГО НЕ подключается!
-        if has_legal or has_court_specific:
-            if has_court_specific and not any(k in q for k in ["стать", "гк рф", "нк рф", "кодекс"]):
-                return [COLLECTION_COURT, COLLECTION_LAWS]
-            return [COLLECTION_LAWS, COLLECTION_COURT]
-
-        # 5. Автоновости и макроэкономика
-        if has_news and not (has_legal or has_court_specific):
-            return [COLLECTION_NEWS]
-
-        # 6. Если в запросе найдена конкретная модель автомобиля
-        if has_brand:
-            return [COLLECTION_CARS]
-
-        # Дефолт для общих вопросов по аренде/раскату: нормативная база + практика судов
+        # 3. Нормативная база и судебная практика (квота: 4 Нормативная база, 1 ВС РФ)
         return [COLLECTION_LAWS, COLLECTION_COURT]
 
 
 class HybridRetriever:
     """
     Гибридный поисковый модуль:
-    1. BM25 (точный лексический поиск по номерам статей и терминам)
+    1. BM25 (морфологический лексический поиск с лемматизацией pymorphy3)
     2. Dense Vector (смысловой поиск в ChromaDB)
     3. RRF Слияние + Metadata Boost
-    4. Stratified Quota Re-ranking (гарантия квоты статей законов ГК/НК РФ)
-    5. Parent-Document обогащение
+    4. Cross-Encoder & Salience Re-ranking с сопоставлением нормализованных лемм
+    5. Точный стратифицированный отбор 5 итоговых фрагментов по квотам:
+       - 4 Нормативная база, 1 ВС РФ (по умолчанию)
+       - 2 новости, 3 Нормативная база (при триггерах на новости)
+       - 3 ПДД, 2 Нормативная база (при триггерах на ПДД)
+    6. Parent-Document обогащение
     """
 
     def __init__(self):
@@ -183,7 +166,6 @@ class HybridRetriever:
             if res and res["ids"] and len(res["ids"][0]) > 0:
                 for idx, c_id in enumerate(res["ids"][0]):
                     dist = res["distances"][0][idx] if res.get("distances") else 0.5
-                    # Преобразуем косинусную дистанцию в сходство (1 - dist)
                     similarity = max(0.0, 1.0 - dist)
                     meta = res["metadatas"][0][idx] if res.get("metadatas") else {}
                     doc_text = res["documents"][0][idx] if res.get("documents") else ""
@@ -196,30 +178,32 @@ class HybridRetriever:
     def _rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Переранжирование (Cross-Encoder / Salience Re-ranking).
-        Оценивает смысловую плотность, совпадение точных юридических сущностей,
-        номеров статей и реквизитов.
+        Использует лемматизацию pymorphy3 для нахождения разных словоформ
+        ('транспортный налог' <-> 'транспортного налога', 'гражданская ответственность' <-> 'гражданской ответственности').
         """
         q_lower = query.lower()
-        q_tokens = set(re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', q_lower))
+        q_lemmas = set(lemmatize_text(query))
 
-        # Извлечение номеров статей из запроса (например: 615, 619, 624, 665, 450)
-        article_numbers = set(re.findall(r'\b\d{2,4}\b', q_lower))
+        # Извлечение номеров статей из запроса (например: 615, 619, 624, 665, 450, 50_1, 50.1)
+        article_numbers = set(re.findall(r'\b\d{1,4}(?:[._]\d+)?\b', q_lower))
         wants_articles = any(k in q_lower for k in ["стать", "ст.", "гк рф", "нк рф", "кодекс"])
 
         for item in candidates:
-            text_lower = item["text"].lower()
-            title_lower = item.get("metadata", {}).get("title", "").lower()
+            text_str = item["text"] + " " + item.get("metadata", {}).get("title", "")
+            doc_lemmas = set(lemmatize_text(text_str))
             coll = item.get("collection", "")
 
-            # 1. Лексическое совпадение реквизитов
-            token_overlap = sum(1 for t in q_tokens if t in text_lower or t in title_lower)
-            lexical_multiplier = 1.0 + (min(token_overlap, 10) * 0.06)
+            # 1. Лексическое совпадение лемм (покрывает любые падежи и склонения)
+            lemma_overlap = len(q_lemmas.intersection(doc_lemmas))
+            lexical_multiplier = 1.0 + (min(lemma_overlap, 10) * 0.08)
 
             # 2. Бонус точного совпадения запрашиваемой статьи ГК/НК
             article_multiplier = 1.0
             if article_numbers:
+                text_lower = item["text"].lower()
                 for num in article_numbers:
-                    if f"статья {num}" in text_lower or f"ст. {num}" in text_lower or f"статье {num}" in text_lower:
+                    num_clean = num.replace("_", ".").replace("-", ".")
+                    if f"статья {num}" in text_lower or f"ст. {num}" in text_lower or f"статье {num}" in text_lower or f"статья {num_clean}" in text_lower:
                         article_multiplier += 0.35
 
             # 3. Приоритетный буст нормативной базы при юридическом вопросе
@@ -227,7 +211,7 @@ class HybridRetriever:
             if coll == COLLECTION_LAWS and wants_articles:
                 norm_multiplier = 1.25
 
-            # 4. Metadata Boost (приоритетные нормы)
+            # 4. Metadata Boost (высокоприоритетные нормы)
             priority = item.get("metadata", {}).get("priority_level", "standard")
             boost = PRIORITY_HIGH_BOOST if priority == "high" else (PRIORITY_MEDIUM_BOOST if priority == "medium" else 1.0)
 
@@ -239,58 +223,73 @@ class HybridRetriever:
         reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
         return reranked
 
-    def _stratified_selection(self, query: str, ranked_candidates: List[Dict[str, Any]], target_collections: List[str], top_k: int) -> List[Dict[str, Any]]:
+    def _stratified_selection(self, query: str, ranked_candidates: List[Dict[str, Any]], target_collections: List[str], top_k: int = 5) -> List[Dict[str, Any]]:
         """
-        Стратифицированный отбор (Stratified Quota Retrieval):
-        Гарантирует, что при юридических запросах статьи ГК/НК РФ (legal_laws)
-        не вытесняются массивной судебной практикой ВС РФ (court_cases).
+        Стратифицированный отбор строго по правилу состава итоговых 5 фрагментов:
+        - По умолчанию: 4 Нормативная база (legal_laws), 1 ВС РФ (court_cases);
+        - Если слова-триггеры на новости: 2 новости (auto_news), 3 Нормативная база (legal_laws);
+        - Если слова-триггеры на ПДД: 3 ПДД (traffic_rules), 2 Нормативная база (legal_laws);
+        - На авто пока не нужны триггеры.
         """
-        if COLLECTION_LAWS not in target_collections or COLLECTION_COURT not in target_collections:
-            return ranked_candidates[:top_k]
-
         q_lower = query.lower()
-        wants_articles = any(k in q_lower for k in ["стать", "ст.", "гк рф", "нк рф", "кодекс", "закон", "норма"])
-        wants_court = any(k in q_lower for k in ["судебн", "вс рф", "верховн", "дело", "определени", "практик"])
+        has_pdd = any(k in q_lower for k in QueryRouter.PDD_KEYWORDS)
+        has_news = any(k in q_lower for k in QueryRouter.NEWS_KEYWORDS)
 
-        # Определение квоты
-        if wants_articles and not wants_court:
-            min_laws = min(3, top_k - 1)
-            min_court = 1
-        elif wants_court and not wants_articles:
-            min_court = min(3, top_k - 1)
-            min_laws = 1
+        if has_pdd:
+            quotas = [(COLLECTION_PDD, 3), (COLLECTION_LAWS, 2)]
+        elif has_news:
+            quotas = [(COLLECTION_NEWS, 2), (COLLECTION_LAWS, 3)]
         else:
-            # Сбалансированная выдача 50/50: норма права + ее применение в суде
-            min_laws = 2
-            min_court = 2
+            quotas = [(COLLECTION_LAWS, 4), (COLLECTION_COURT, 1)]
 
-        laws_items = [c for c in ranked_candidates if c.get("collection") == COLLECTION_LAWS]
-        court_items = [c for c in ranked_candidates if c.get("collection") == COLLECTION_COURT]
-        other_items = [c for c in ranked_candidates if c.get("collection") not in (COLLECTION_LAWS, COLLECTION_COURT)]
+        by_coll: Dict[str, List[Dict[str, Any]]] = {}
+        for item in ranked_candidates:
+            c = item.get("collection", "")
+            if c not in by_coll:
+                by_coll[c] = []
+            by_coll[c].append(item)
 
         selected = []
         selected_ids = set()
 
-        # Набираем обязательную квоту из нормативной базы
-        for item in laws_items[:min_laws]:
-            selected.append(item)
-            selected_ids.add(item["id"])
+        # 1. Заполняем квоты (с приоритетом уникальных статей/документов по parent_id)
+        for coll, count in quotas:
+            items_for_coll = by_coll.get(coll, [])
+            coll_selected = 0
+            coll_parent_ids = set()
 
-        # Набираем обязательную квоту из судебной практики
-        for item in court_items[:min_court]:
-            selected.append(item)
-            selected_ids.add(item["id"])
+            # Первый проход: отбираем разные родительские статьи
+            for item in items_for_coll:
+                p_id = item.get("metadata", {}).get("parent_id", item["id"])
+                if item["id"] not in selected_ids and p_id not in coll_parent_ids:
+                    selected.append(item)
+                    selected_ids.add(item["id"])
+                    coll_parent_ids.add(p_id)
+                    coll_selected += 1
+                    if coll_selected >= count:
+                        break
 
-        # Дополняем оставшиеся места наивысшими по баллу кандидатами из общего пула
-        for item in ranked_candidates:
-            if len(selected) >= top_k:
-                break
-            if item["id"] not in selected_ids:
-                selected.append(item)
-                selected_ids.add(item["id"])
+            # Второй проход: если уникальных статей меньше квоты, добираем чанки
+            if coll_selected < count:
+                for item in items_for_coll:
+                    if item["id"] not in selected_ids:
+                        selected.append(item)
+                        selected_ids.add(item["id"])
+                        coll_selected += 1
+                        if coll_selected >= count:
+                            break
 
-        # Финальная сортировка отобранных источников по реранк-баллу
-        return sorted(selected, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
+        # 2. Если в какой-то коллекции не хватило документов до квоты,
+        # добираем из общего пула кандидатов до 5 фрагментов
+        if len(selected) < top_k:
+            for item in ranked_candidates:
+                if len(selected) >= top_k:
+                    break
+                if item["id"] not in selected_ids:
+                    selected.append(item)
+                    selected_ids.add(item["id"])
+
+        return selected[:top_k]
 
     def retrieve(self, query: str, top_k: int = TOP_K_RERANK) -> Dict[str, Any]:
         """
