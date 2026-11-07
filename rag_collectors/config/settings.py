@@ -105,14 +105,14 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/901807667",
         "section": "КоАП РФ",
         "category": "КоАП РФ",
-        "prefix": "civics",
+        "prefix": "exec",
         "details": "Федеральный закон от 30 декабря 2001 года № 195-ФЗ (Глава 12: Нарушения в области дорожного движения)"
     },
     {
         "title": "ФЕДЕРАЛЬНЫЙ ЗАКОН Об обязательном страховании гражданской ответственности владельцев транспортных средств (с изменениями на 26 мая 2026 года)",
         "url": "https://docs.cntd.ru/document/901817083",
         "section": "Законодательство об авто и транспорте",
-        "category": "ОСАГО",
+        "category": "osago",
         "prefix": "civics",
         "details": "Федеральный закон от 25 апреля 2002 года № 40-ФЗ"
     },
@@ -121,7 +121,7 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/420363714",
         "section": "Законодательство об авто и транспорте",
         "category": "Страховое дело",
-        "prefix": "civics",
+        "prefix": "insurance",
         "details": "Федеральный закон от 23 июля 2013 года № 234-ФЗ"
     },
     {
@@ -129,7 +129,7 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/9014765",
         "section": "Законодательство об авто и транспорте",
         "category": "Безопасность дорожного движения",
-        "prefix": "civics",
+        "prefix": "safety",
         "details": "Федеральный закон от 10 декабря 1995 года № 196-ФЗ"
     },
     {
@@ -137,7 +137,7 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/550835222",
         "section": "Законодательство об авто и транспорте",
         "category": "Регистрация ТС",
-        "prefix": "civics",
+        "prefix": "reg",
         "details": "Федеральный закон от 3 августа 2018 года № 283-ФЗ"
     },
     {
@@ -145,7 +145,7 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/9005388",
         "section": "Законодательство об авто и транспорте",
         "category": "Защита прав потребителей",
-        "prefix": "civics",
+        "prefix": "consum",
         "details": "Закон РФ от 7 февраля 1992 года № 2300-1"
     },
     {
@@ -153,7 +153,7 @@ CNTD_PRIMARY_LAWS = [
         "url": "https://docs.cntd.ru/document/901719743",
         "section": "Законодательство об авто и транспорте",
         "category": "Лизинг",
-        "prefix": "civics",
+        "prefix": "leasing",
         "details": "Федеральный закон от 29 октября 1998 года № 164-ФЗ"
     }
 ]
