@@ -260,6 +260,8 @@ class LawsCollector(BaseCollector):
                 elif m.group("article"):
                     art_num_val = m.group(5).strip()
                     art_title_val = m.group(6).strip()
+                    if re.search(r'исключен[аы]?\b', art_title_val, re.IGNORECASE):
+                        continue
                     start_body = m.end()
                     end_body = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_text)
                     raw_body = raw_text[start_body:end_body]
