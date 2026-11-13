@@ -1,18 +1,30 @@
 """
-Генератор ответов RAG на базе Gemini 3.1 Flash Lite.
-Формирует юридически точные ответы со строгими ссылками на первоисточники в тексте.
-Ведет подробный аудит ошибок подключения к Gemini в logs/gemini_connection.log.
+Генератор ответов RAG на базе Gemini 3.1 Flash Lite и двухэтапного конвейера поиска:
+1. Вызов Gemini для формулирования 2-6 поисковых тем по вопросу юриста.
+2. Сбор ~40 статей по этим темам + реранкинг (отбор 5 лучших статей).
+3. Объединение с 5 фрагментами стандартного отбора = ИТОГО 10 первоисточников.
+4. Вызов Gemini (или детерминированный фоллбэк) с детальным логированием.
 """
 
+import json
 import logging
 import os
+import re
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rag_pipeline.config import GEMINI_API_KEY, LOGS_DIR, MODEL_NAME
+from rag_pipeline.config import (
+    COLLECTION_COURT,
+    COLLECTION_LAWS,
+    COLLECTION_NEWS,
+    COLLECTION_PDD,
+    GEMINI_API_KEY,
+    LOGS_DIR,
+    MODEL_NAME,
+)
 from rag_pipeline.retriever import HybridRetriever
 
 # Настройка специализированного логгера для Gemini и конвейера
@@ -22,7 +34,6 @@ logger.setLevel(logging.INFO)
 GEMINI_LOG_FILE = LOGS_DIR / "gemini_connection.log"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Отдельный FileHandler для фиксации всех событий и ошибок подключения
 _fh = logging.FileHandler(GEMINI_LOG_FILE, encoding="utf-8")
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
 logger.addHandler(_fh)
@@ -65,7 +76,7 @@ def _log_gemini_error(event_type: str, query: str, reason: str, details: str = "
 
 
 class RAGAssistant:
-    """Полный конвейер RAG: Hybrid Retrieval -> Gemini 3.1 Flash Lite Generation"""
+    """Полный конвейер RAG с двухэтапным тематическим отбором (10 статей) и генерацией"""
 
     def __init__(self):
         self.retriever = HybridRetriever()
@@ -95,129 +106,333 @@ class RAGAssistant:
             logger.error(self.init_error)
             _log_gemini_error("CLIENT_INIT_ERROR", "system_init", self.init_error, str(init_err), traceback.format_exc())
 
-    def answer_query(self, query: str) -> Dict[str, Any]:
+    def extract_topics(self, query: str, client: Optional[Any] = None) -> List[str]:
         """
-        Полный цикл обработки пользовательского вопроса:
-        1. Retrieval (Router + BM25 + Dense + Rerank)
-        2. Prompt Compilation with Strict Citation Anchors
-        3. LLM Generation (Gemini 3.1 Flash Lite)
-        4. Post-processing & Sources Extraction
-        5. Detailed error logging to logs/gemini_connection.log if fallback triggers
+        Этап 1 двухэтапного конвейера: отправляет промпт юриста модели Gemini
+        с задачей выделить от 2 до 6 ключевых тем/поисковых подзапросов по вопросу.
         """
-        # Шаг 1: Извлечение релевантных контекстов
-        retrieval_res = self.retriever.retrieve(query)
-        sources = retrieval_res["sources"]
-        context_text = retrieval_res["formatted_context"]
+        active_client = client or self.client
+        if active_client:
+            try:
+                topic_prompt = (
+                    "Ты — ведущий юрисконсульт по российскому законодательству. "
+                    "Проанализируй юридический вопрос юриста компании по аренде и выкупу авто (раскату):\n"
+                    f"\"{query}\"\n\n"
+                    "Сформулируй от 2 до 6 конкретных поисковых тем/подзапросов для поиска релевантных статей "
+                    "в Гражданском кодексе РФ, Налоговом кодексе РФ, КоАП РФ, 164-ФЗ 'О лизинге', 40-ФЗ 'Об ОСАГО' и ПДД РФ. "
+                    "Каждая тема должна содержать 2-4 ключевых слова в именительном падеже (например: "
+                    "'расторжение договора аренды', 'изъятие транспортного средства', 'неустойка и штрафные санкции').\n"
+                    "Ответь ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом строк. Без комментариев и Markdown-разметки."
+                )
+                res = active_client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=topic_prompt,
+                    config={"temperature": 0.1}
+                )
+                text = (res.text or "").strip()
+                # Извлекаем JSON массив
+                json_match = re.search(r'\[\s*".*?"\s*\]', text, re.DOTALL)
+                if json_match:
+                    topics = json.loads(json_match.group(0))
+                    if isinstance(topics, list) and len(topics) >= 2:
+                        return [str(t).strip() for t in topics[:6] if str(t).strip()]
+            except Exception as e:
+                logger.warning(f"Ошибка извлечения тем через Gemini ({e}), используем резервный эвристический анализ.")
 
-        if not sources or not context_text.strip():
-            return {
-                "query": query,
-                "answer": (
-                    "В базе знаний компании не найдено релевантных документов по вашему вопросу. "
-                    "Пожалуйста, запустите переиндексацию (`reindex_rag.bat`) "
-                    "или коллектор сбора данных (`run_collectors.bat all`)."
-                ),
-                "target_collections": retrieval_res.get("target_collections", []),
-                "sources": [],
-                "fallback_used": False,
-                "fallback_reason": None,
-                "gemini_status": "no_context"
-            }
+        # Резервный эвристический генератор тем (если нет API-ключа или сетевая ошибка)
+        q_lower = query.lower()
+        extracted = []
+        if any(w in q_lower for w in ["расторж", "расторгн", "прекращен"]):
+            extracted.append("расторжение договора аренды")
+            extracted.append("основания изменения и расторжения договора")
+        if any(w in q_lower for w in ["налог", "транспортн налог", "ндс", "прибыль"]):
+            extracted.append("транспортный налог порядок исчисления")
+            extracted.append("налогоплательщики и налоговая база")
+        if any(w in q_lower for w in ["лизинг", "выкуп", "раскат", "финансов аренд"]):
+            extracted.append("договор финансовой аренды лизинга")
+            extracted.append("передача предмета лизинга и выкупная стоимость")
+        if any(w in q_lower for w in ["убытк", "неустойк", "ответственност", "штраф"]):
+            extracted.append("ответственность за нарушение обязательств")
+            extracted.append("возмещение убытков и взыскание неустойки")
+        if any(w in q_lower for w in ["пдд", "скорост", "дтп", "обгон", "штраф"]):
+            extracted.append("правила дорожного движения обязанности водителя")
+            extracted.append("административная ответственность за нарушение пдд")
 
-        # Шаг 2: Формирование промпта
-        user_prompt = f"""КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ КОМПАНИИ:
-{context_text}
+        if not extracted:
+            words = re.findall(r'\b[а-яА-Яa-zA-Z]{4,}\b', query)
+            if len(words) >= 4:
+                extracted.append(" ".join(words[:2]))
+                extracted.append(" ".join(words[2:4]))
+            else:
+                extracted.append(query)
+                extracted.append("обязательства и ответственность сторон договора")
 
+        return extracted[:6]
+
+    def prepare_10_sources_context(
+        self,
+        query: str,
+        attached_doc_text: str = "",
+        client: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """
+        Двухэтапный сбор контекста (10 статей):
+        1. 5 стандартных фрагментов (4 нормы + 1 ВС РФ / ПДД / новости)
+        2. 2-6 тем через Gemini -> поиск ~40 кандидатов -> реранкинг -> 5 лучших статей
+        3. Итого 10 уникальных статей в контексте
+        """
+        # Шаг 1: Стандартный сбор (5 фрагментов)
+        standard_res = self.retriever.retrieve(query, top_k=5)
+        standard_sources = standard_res.get("sources", [])
+        standard_parent_ids = {s.get("parent_id") for s in standard_sources if s.get("parent_id")}
+        standard_chunk_ids = {s.get("chunk_id") for s in standard_sources if s.get("chunk_id")}
+
+        # Шаг 2: Выделение 2-6 тем через Gemini
+        topics = self.extract_topics(query, client=client or self.client)
+        logger.info(f"Сгенерированные темы по вопросу: {topics}")
+
+        # Шаг 3: Сбор пула кандидатов по темам (~40 статей)
+        topic_candidates_map: Dict[str, Dict[str, Any]] = {}
+        target_colls = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_PDD]
+
+        for topic in topics:
+            for coll in target_colls:
+                # BM25 поиск по теме
+                if coll in self.retriever.bm25_indices:
+                    hits = self.retriever.bm25_indices[coll].search(topic, top_k=6)
+                    for rank, (doc_id, bm_score) in enumerate(hits):
+                        if doc_id in self.retriever.bm25_indices[coll].docs_map:
+                            chunk_obj = self.retriever.bm25_indices[coll].docs_map[doc_id]
+                            if doc_id not in topic_candidates_map:
+                                topic_candidates_map[doc_id] = {
+                                    "id": doc_id,
+                                    "collection": coll,
+                                    "text": chunk_obj["text"],
+                                    "metadata": chunk_obj.get("metadata", {}),
+                                    "rrf_score": 1.0 / (60.0 + rank)
+                                }
+
+                # Dense поиск по теме
+                dense_hits = self.retriever._dense_search(coll, topic, top_k=6)
+                for rank, (doc_id, sim, meta, text) in enumerate(dense_hits):
+                    if doc_id not in topic_candidates_map:
+                        topic_candidates_map[doc_id] = {
+                            "id": doc_id,
+                            "collection": coll,
+                            "text": text,
+                            "metadata": meta,
+                            "rrf_score": 1.0 / (60.0 + rank)
+                        }
+
+        # Шаг 4: Ранжирование собранных ~40 кандидатов против оригинального вопроса
+        all_topic_candidates = list(topic_candidates_map.values())
+        ranked_topic_candidates = self.retriever._rerank_candidates(query, all_topic_candidates)
+
+        # Шаг 5: Отбор 5 лучших статей из тематического поиска (без дублирования стандартных)
+        topic_sources = []
+        seen_parents = set(standard_parent_ids)
+        seen_chunks = set(standard_chunk_ids)
+
+        for item in ranked_topic_candidates:
+            if len(topic_sources) >= 5:
+                break
+            meta = item.get("metadata", {})
+            p_id = meta.get("parent_id")
+            c_id = item["id"]
+
+            if p_id and p_id in seen_parents:
+                continue
+            if c_id in seen_chunks:
+                continue
+
+            parent_doc = self.retriever.parent_store.get(p_id, {})
+            title = parent_doc.get("title") or meta.get("title", "Документ")
+            clean_pid = p_id or c_id
+            url = f"?doc={clean_pid}#doc-legal_{clean_pid}" if "legal" in item.get("collection", "") else (parent_doc.get("url") or meta.get("url", "#"))
+
+            topic_sources.append({
+                "chunk_id": c_id,
+                "parent_id": p_id,
+                "collection": item["collection"],
+                "title": title,
+                "url": url,
+                "doc_type": meta.get("doc_type", "legal_law"),
+                "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
+                "date": parent_doc.get("date") or meta.get("date", ""),
+                "similarity_score": item.get("rerank_score", 0.0),
+                "matched_chunk": item["text"],
+                "source_tag": "topic_expansion"
+            })
+            if p_id:
+                seen_parents.add(p_id)
+            seen_chunks.add(c_id)
+
+        # Если уникальных не хватило до 5, добираем следующие лучшие
+        if len(topic_sources) < 5:
+            for item in ranked_topic_candidates:
+                if len(topic_sources) >= 5:
+                    break
+                c_id = item["id"]
+                if c_id not in seen_chunks:
+                    meta = item.get("metadata", {})
+                    p_id = meta.get("parent_id")
+                    parent_doc = self.retriever.parent_store.get(p_id, {})
+                    title = parent_doc.get("title") or meta.get("title", "Документ")
+                    clean_pid = p_id or c_id
+                    url = f"?doc={clean_pid}#doc-legal_{clean_pid}" if "legal" in item.get("collection", "") else (parent_doc.get("url") or meta.get("url", "#"))
+                    topic_sources.append({
+                        "chunk_id": c_id,
+                        "parent_id": p_id,
+                        "collection": item["collection"],
+                        "title": title,
+                        "url": url,
+                        "doc_type": meta.get("doc_type", "legal_law"),
+                        "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
+                        "date": parent_doc.get("date") or meta.get("date", ""),
+                        "similarity_score": item.get("rerank_score", 0.0),
+                        "matched_chunk": item["text"],
+                        "source_tag": "topic_expansion"
+                    })
+                    seen_chunks.add(c_id)
+
+        # Маркируем стандартные источники
+        for s in standard_sources:
+            s["source_tag"] = "standard_retrieval"
+            # Обновляем URL для мгновенной адресации в Streamlit
+            if s.get("parent_id") and s.get("collection") == COLLECTION_LAWS:
+                s["url"] = f"?doc={s['parent_id']}#doc-legal_{s['parent_id']}"
+            elif s.get("parent_id") and s.get("collection") == COLLECTION_PDD:
+                s["url"] = f"?pdd={s['parent_id']}#doc-pdd_{s['parent_id']}"
+
+        # Объединяем источники: 5 стандартных + 5 тематических = 10 статей
+        final_sources = standard_sources + topic_sources
+        for idx, s in enumerate(final_sources, 1):
+            s["citation_id"] = idx
+
+        # Формируем блоки контекста для промпта
+        context_blocks = []
+        for s in final_sources:
+            tag_label = "Базовый поиск" if s.get("source_tag") == "standard_retrieval" else "Тематическое расширение"
+            block = (
+                f"[Источник #{s['citation_id']}] ({s['collection']} | {tag_label})\n"
+                f"Заголовок: {s['title']}\n"
+                f"Ссылка: {s['url']}\n"
+            )
+            if s.get("case_number"):
+                block += f"Номер дела: {s['case_number']} (Дата: {s.get('date', 'н/д')})\n"
+            block += f"Текст нормы / фрагмента:\n{s['matched_chunk']}\n"
+            context_blocks.append(block)
+
+        formatted_context = "\n---\n".join(context_blocks)
+
+        # Формируем итоговый user_prompt
+        user_prompt = f"""КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ КОМПАНИИ (10 ПРОВЕРЕННЫХ ПЕРВОИСТОЧНИКОВ):
+{formatted_context}
+"""
+        if attached_doc_text.strip():
+            user_prompt += f"""
 ---
-ВОПРОС ПОЛЬЗОВАТЕЛЯ:
+[ПРИКРЕПЛЕННЫЙ ДОКУМЕНТ ЮРИСТА ДЛЯ АНАЛИЗА]:
+{attached_doc_text.strip()[:6000]}
+"""
+
+        user_prompt += f"""
+---
+ВОПРОС ЮРИСТА:
 {query}
 
-Дайте структурированный, исчерпывающий ответ на русском языке со ссылками на первоисточники в формате Markdown."""
+Дай структурированный, исчерпывающий ответ на русском языке со ссылками на первоисточники в формате Markdown."""
 
-        # Шаг 3: Генерация через Gemini
-        answer_text = ""
-        fallback_reason: Optional[str] = None
-        gemini_status = "ok"
+        return {
+            "query": query,
+            "topics": topics,
+            "standard_count": len(standard_sources),
+            "topic_count": len(topic_sources),
+            "total_count": len(final_sources),
+            "sources": final_sources,
+            "formatted_context": formatted_context,
+            "user_prompt": user_prompt,
+            "target_collections": standard_res.get("target_collections", [])
+        }
 
-        if not self.client:
-            fallback_reason = self.init_error or "Клиент Gemini не инициализирован (отсутствует GEMINI_API_KEY)"
-            gemini_status = "missing_key" if "GEMINI_API_KEY" in fallback_reason else "init_failed"
-        else:
+    def generate_with_gemini(
+        self,
+        user_prompt: str,
+        client: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """Отправка скомпилированного промпта в Gemini 3.1 Flash Lite"""
+        active_client = client or self.client
+        if not active_client:
+            reason = self.init_error or "Клиент Gemini не инициализирован (отсутствует GEMINI_API_KEY)"
+            return {
+                "answer": "",
+                "status": "missing_key" if "GEMINI_API_KEY" in reason else "init_failed",
+                "error": reason
+            }
+
+        try:
+            response = active_client.models.generate_content(
+                model=MODEL_NAME,
+                contents=user_prompt,
+                config={
+                    "system_instruction": SYSTEM_PROMPT,
+                    "temperature": 0.2,
+                }
+            )
+            text = response.text or ""
+            return {"answer": text, "status": "ok", "error": None}
+        except Exception as gen_err:
+            err_type = type(gen_err).__name__
+            err_msg = str(gen_err)
+            logger.warning(f"Ошибка вызова Gemini API ({MODEL_NAME}): {err_type} - {err_msg}")
+
+            # Резервная модель
+            fallback_model = "gemini-2.5-flash"
             try:
-                response = self.client.models.generate_content(
-                    model=MODEL_NAME,
+                logger.info(f"Попытка обращения к резервной модели {fallback_model}...")
+                response = active_client.models.generate_content(
+                    model=fallback_model,
                     contents=user_prompt,
-                    config={
-                        "system_instruction": SYSTEM_PROMPT,
-                        "temperature": 0.2,  # Низкая температура для юридической строгости
-                    }
+                    config={"system_instruction": SYSTEM_PROMPT, "temperature": 0.2}
                 )
-                answer_text = response.text or ""
-            except Exception as gen_err:
-                err_type = type(gen_err).__name__
-                err_msg = str(gen_err)
-                tb_str = traceback.format_exc()
-                logger.warning(f"Ошибка вызова Gemini API ({MODEL_NAME}): {err_type} - {err_msg}")
+                text = response.text or ""
+                if text:
+                    return {"answer": text, "status": "ok_fallback_model", "error": None}
+            except Exception as fb_err:
+                full_reason = f"Основная модель ({MODEL_NAME}) вернула: [{err_type}] {err_msg}. Резервная модель: {fb_err}"
+                _log_gemini_error("API_CALL_FAILED", user_prompt[:150], full_reason, tb=traceback.format_exc())
+                return {"answer": "", "status": "api_error", "error": full_reason}
 
-                # Попытка обращения к резервной модели
-                fallback_model = "gemini-2.5-flash"
-                try:
-                    logger.info(f"Попытка обращения к резервной модели {fallback_model}...")
-                    response = self.client.models.generate_content(
-                        model=fallback_model,
-                        contents=user_prompt,
-                        config={"system_instruction": SYSTEM_PROMPT, "temperature": 0.2}
-                    )
-                    answer_text = response.text or ""
-                    if answer_text:
-                        logger.info(f"Ответ успешно получен от резервной модели {fallback_model}")
-                except Exception as fb_err:
-                    fallback_reason = (
-                        f"Основная модель ({MODEL_NAME}) вернула ошибку: [{err_type}] {err_msg}. "
-                        f"Резервная модель ({fallback_model}) также завершилась ошибкой: {fb_err}"
-                    )
-                    gemini_status = "api_error"
-                    _log_gemini_error(
-                        "API_CALL_FAILED",
-                        query,
-                        fallback_reason,
-                        details=f"Prompt Length: {len(user_prompt)} chars",
-                        tb=tb_str
-                    )
+        return {"answer": "", "status": "empty_response", "error": "Пустой ответ"}
 
-        # Шаг 4: Детерминированный фоллбэк генератор (для локального ПК без API-ключа)
+    def answer_query(self, query: str, attached_doc_text: str = "") -> Dict[str, Any]:
+        """Полный цикл RAG: двухэтапный поиск 10 статей + генерация ответа"""
+        ctx_data = self.prepare_10_sources_context(query, attached_doc_text=attached_doc_text)
+        sources = ctx_data["sources"]
+        user_prompt = ctx_data["user_prompt"]
+        topics = ctx_data["topics"]
+
+        gemini_res = self.generate_with_gemini(user_prompt)
+        answer_text = gemini_res["answer"]
         fallback_used = False
+        fallback_reason = gemini_res.get("error")
+
         if not answer_text:
             fallback_used = True
             if not fallback_reason:
-                fallback_reason = "Ответ от Gemini пуст или заблокирован фильтрами безопасности"
-
-            # Логируем активацию фоллбэка
-            _log_gemini_error(
-                "FALLBACK_ACTIVATED",
-                query,
-                fallback_reason,
-                details=f"Загружен детерминированный синтез _extractive_fallback_generation для {len(sources)} источников"
-            )
-
-            # Вывод предупреждения в консоль PyCharm
-            print(
-                f"\n⚠️  [RAG ASSISTANT WARNING] Загружен _extractive_fallback_generation!\n"
-                f"    Причина: {fallback_reason}\n"
-                f"    Подробный лог сохранен в: {GEMINI_LOG_FILE}\n",
-                file=sys.stderr
-            )
-
+                fallback_reason = "Ответ от Gemini пуст или заблокирован фильтрами"
+            _log_gemini_error("FALLBACK_ACTIVATED", query, fallback_reason)
             answer_text = self._extractive_fallback_generation(query, sources, reason=fallback_reason)
 
         return {
             "query": query,
             "answer": answer_text,
-            "target_collections": retrieval_res.get("target_collections", []),
+            "topics": topics,
+            "target_collections": ctx_data.get("target_collections", []),
             "sources": sources,
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason,
-            "gemini_status": gemini_status,
+            "gemini_status": gemini_res["status"],
             "log_file": str(GEMINI_LOG_FILE)
         }
 
@@ -227,10 +442,7 @@ class RAGAssistant:
         sources: List[Dict[str, Any]],
         reason: Optional[str] = None
     ) -> str:
-        """
-        Локальный высокоточный генератор на случай отсутствия API-ключа Gemini или сетевых сбоев.
-        Синтезирует ответ из родительских документов с сохранением ссылок и реквизитов.
-        """
+        """Локальный генератор на случай отсутствия API-ключа Gemini или сетевых сбоев"""
         parts = [
             "**Ответ RAG-ассистента по базе знаний компании (сформирован локально по первоисточникам):**\n"
         ]
@@ -241,47 +453,36 @@ class RAGAssistant:
                 "`GEMINI_API_KEY` в файле `.env` или настройках PyCharm. Логи: `logs/gemini_connection.log`.*\n"
             )
 
-        has_cars = any(s["collection"] == "car_catalog" for s in sources)
-        has_laws = any(s["collection"] == "legal_laws" for s in sources)
-        has_court = any(s["collection"] == "court_cases" for s in sources)
-        has_pdd = any(s["collection"] == "traffic_rules" for s in sources)
-        has_news = any(s["collection"] == "auto_news" for s in sources)
+        laws_sources = [s for s in sources if s["collection"] == COLLECTION_LAWS]
+        court_sources = [s for s in sources if s["collection"] == COLLECTION_COURT]
+        pdd_sources = [s for s in sources if s["collection"] == COLLECTION_PDD]
+        news_sources = [s for s in sources if s["collection"] == COLLECTION_NEWS]
 
-        if has_cars:
-            parts.append("### 🚙 Доступные автомобили и условия раската (raskatof.ru)")
-            for s in [src for src in sources if src["collection"] == "car_catalog"][:2]:
-                parts.append(
-                    f"- **[{s['title']}]({s['url']})**: {s['matched_chunk'].split('Условия раската')[0].strip()}"
-                )
-
-        if has_laws:
+        if laws_sources:
             parts.append("### 📜 Нормативно-правовое основание (ГК / НК / КоАП РФ)")
-            for s in [src for src in sources if src["collection"] == "legal_laws"][:3]:
-                meta = s.get("metadata", {})
-                cat = meta.get("category", "")
-                cat_label = f" ({cat})" if cat else ""
+            for s in laws_sources[:5]:
                 parts.append(
-                    f"- По нормам **[{s['title']}]({s['url']})**{cat_label}: {s['matched_chunk'][:300]}..."
+                    f"- По нормам **[{s['title']}]({s['url']})**: {s['matched_chunk'][:300]}..."
                 )
 
-        if has_pdd:
+        if pdd_sources:
             parts.append("### 🚦 Правила дорожного движения РФ (ПДД РФ)")
-            for s in [src for src in sources if src["collection"] == "traffic_rules"][:2]:
+            for s in pdd_sources[:3]:
                 parts.append(
                     f"- По правилам **[{s['title']}]({s['url']})**: {s['matched_chunk'][:350]}..."
                 )
 
-        if has_court:
+        if court_sources:
             parts.append("### ⚖️ Позиция Верховного Суда РФ")
-            for s in [src for src in sources if src["collection"] == "court_cases"][:2]:
+            for s in court_sources[:2]:
                 case_no = s.get("case_number", "не указан")
                 parts.append(
                     f"- В постановлении **[{s['title']}]({s['url']})** (Дело № {case_no}): {s['matched_chunk'][:350]}..."
                 )
 
-        if has_news:
+        if news_sources:
             parts.append("### 📰 Рыночный контекст и аналитика")
-            for s in [src for src in sources if src["collection"] == "auto_news"][:1]:
+            for s in news_sources[:2]:
                 parts.append(
                     f"- По данным статьи **[{s['title']}]({s['url']})**: {s['matched_chunk'][:250]}..."
                 )
