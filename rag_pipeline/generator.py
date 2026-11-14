@@ -106,68 +106,47 @@ class RAGAssistant:
             logger.error(self.init_error)
             _log_gemini_error("CLIENT_INIT_ERROR", "system_init", self.init_error, str(init_err), traceback.format_exc())
 
-    def extract_topics(self, query: str, client: Optional[Any] = None) -> List[str]:
+    def extract_topics(self, query: str, client: Optional[Any] = None) -> tuple[List[str], bool]:
         """
         Этап 1 двухэтапного конвейера: отправляет промпт юриста модели Gemini
         с задачей выделить от 2 до 6 ключевых тем/поисковых подзапросов по вопросу.
+        Возвращает (topics, gemini_connected).
+        Если не вышло подключиться к Gemini API — возвращает ([], False),
+        чтобы сценарий ограничился только 5 стандартными фрагментами.
         """
         active_client = client or self.client
-        if active_client:
-            try:
-                topic_prompt = (
-                    "Ты — ведущий юрисконсульт по российскому законодательству. "
-                    "Проанализируй юридический вопрос юриста компании по аренде и выкупу авто (раскату):\n"
-                    f"\"{query}\"\n\n"
-                    "Сформулируй от 2 до 6 конкретных поисковых тем/подзапросов для поиска релевантных статей "
-                    "в Гражданском кодексе РФ, Налоговом кодексе РФ, КоАП РФ, 164-ФЗ 'О лизинге', 40-ФЗ 'Об ОСАГО' и ПДД РФ. "
-                    "Каждая тема должна содержать 2-4 ключевых слова в именительном падеже (например: "
-                    "'расторжение договора аренды', 'изъятие транспортного средства', 'неустойка и штрафные санкции').\n"
-                    "Ответь ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом строк. Без комментариев и Markdown-разметки."
-                )
-                res = active_client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=topic_prompt,
-                    config={"temperature": 0.1}
-                )
-                text = (res.text or "").strip()
-                # Извлекаем JSON массив
-                json_match = re.search(r'\[\s*".*?"\s*\]', text, re.DOTALL)
-                if json_match:
-                    topics = json.loads(json_match.group(0))
-                    if isinstance(topics, list) and len(topics) >= 2:
-                        return [str(t).strip() for t in topics[:6] if str(t).strip()]
-            except Exception as e:
-                logger.warning(f"Ошибка извлечения тем через Gemini ({e}), используем резервный эвристический анализ.")
+        if not active_client:
+            return [], False
 
-        # Резервный эвристический генератор тем (если нет API-ключа или сетевая ошибка)
-        q_lower = query.lower()
-        extracted = []
-        if any(w in q_lower for w in ["расторж", "расторгн", "прекращен"]):
-            extracted.append("расторжение договора аренды")
-            extracted.append("основания изменения и расторжения договора")
-        if any(w in q_lower for w in ["налог", "транспортн налог", "ндс", "прибыль"]):
-            extracted.append("транспортный налог порядок исчисления")
-            extracted.append("налогоплательщики и налоговая база")
-        if any(w in q_lower for w in ["лизинг", "выкуп", "раскат", "финансов аренд"]):
-            extracted.append("договор финансовой аренды лизинга")
-            extracted.append("передача предмета лизинга и выкупная стоимость")
-        if any(w in q_lower for w in ["убытк", "неустойк", "ответственност", "штраф"]):
-            extracted.append("ответственность за нарушение обязательств")
-            extracted.append("возмещение убытков и взыскание неустойки")
-        if any(w in q_lower for w in ["пдд", "скорост", "дтп", "обгон", "штраф"]):
-            extracted.append("правила дорожного движения обязанности водителя")
-            extracted.append("административная ответственность за нарушение пдд")
-
-        if not extracted:
-            words = re.findall(r'\b[а-яА-Яa-zA-Z]{4,}\b', query)
-            if len(words) >= 4:
-                extracted.append(" ".join(words[:2]))
-                extracted.append(" ".join(words[2:4]))
-            else:
-                extracted.append(query)
-                extracted.append("обязательства и ответственность сторон договора")
-
-        return extracted[:6]
+        try:
+            topic_prompt = (
+                "Ты — ведущий юрисконсульт по российскому законодательству. "
+                "Проанализируй юридический вопрос юриста компании по аренде и выкупу авто (раскату):\n"
+                f"\"{query}\"\n\n"
+                "Сформулируй от 2 до 6 конкретных поисковых тем/подзапросов для поиска релевантных статей "
+                "в Гражданском кодексе РФ, Налоговом кодексе РФ, КоАП РФ, 164-ФЗ 'О лизинге', 40-ФЗ 'Об ОСАГО' и ПДД РФ. "
+                "Каждая тема должна содержать 2-4 ключевых слова в именительном падеже (например: "
+                "'расторжение договора аренды', 'изъятие транспортного средства', 'неустойка и штрафные санкции').\n"
+                "Ответь ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом строк. Без комментариев и Markdown-разметки."
+            )
+            res = active_client.models.generate_content(
+                model=MODEL_NAME,
+                contents=topic_prompt,
+                config={"temperature": 0.1}
+            )
+            text = (res.text or "").strip()
+            json_match = re.search(r'\[\s*".*?"\s*\]', text, re.DOTALL)
+            if json_match:
+                topics = json.loads(json_match.group(0))
+                cleaned = [str(t).strip() for t in topics[:6] if str(t).strip()] if isinstance(topics, list) else []
+                if len(cleaned) >= 2:
+                    return cleaned, True
+            # Подключение к Gemini состоялось, но тем меньше 2 — считаем Gemini доступным
+            return [], True
+        except Exception as e:
+            logger.warning(f"Не удалось подключиться к Gemini API на этапе выделения тем ({e}). Используем только 5 базовых фрагментов.")
+            _log_gemini_error("TOPIC_EXTRACTION_FAILED", query, f"Ошибка подключения к Gemini: {e}")
+            return [], False
 
     def prepare_10_sources_context(
         self,
@@ -176,135 +155,140 @@ class RAGAssistant:
         client: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
-        Двухэтапный сбор контекста (10 статей):
-        1. 5 стандартных фрагментов (4 нормы + 1 ВС РФ / ПДД / новости)
-        2. 2-6 тем через Gemini -> поиск ~40 кандидатов -> реранкинг -> 5 лучших статей
-        3. Итого 10 уникальных статей в контексте
+        Двухэтапный сбор контекста:
+        - При доступном Gemini API: 5 стандартных фрагментов + 5 лучших статей из тематического поиска (~40 кандидатов) = ИТОГО 10.
+        - Если не вышло подключиться к Gemini API: ТОЛЬКО 5 стандартных фрагментов.
         """
         # Шаг 1: Стандартный сбор (5 фрагментов)
         standard_res = self.retriever.retrieve(query, top_k=5)
-        standard_sources = standard_res.get("sources", [])
+        standard_sources = standard_res.get("sources", [])[:5]
         standard_parent_ids = {s.get("parent_id") for s in standard_sources if s.get("parent_id")}
         standard_chunk_ids = {s.get("chunk_id") for s in standard_sources if s.get("chunk_id")}
 
-        # Шаг 2: Выделение 2-6 тем через Gemini
-        topics = self.extract_topics(query, client=client or self.client)
-        logger.info(f"Сгенерированные темы по вопросу: {topics}")
-
-        # Шаг 3: Сбор пула кандидатов по темам (~40 статей)
-        topic_candidates_map: Dict[str, Dict[str, Any]] = {}
-        target_colls = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_PDD]
-
-        for topic in topics:
-            for coll in target_colls:
-                # BM25 поиск по теме
-                if coll in self.retriever.bm25_indices:
-                    hits = self.retriever.bm25_indices[coll].search(topic, top_k=6)
-                    for rank, (doc_id, bm_score) in enumerate(hits):
-                        if doc_id in self.retriever.bm25_indices[coll].docs_map:
-                            chunk_obj = self.retriever.bm25_indices[coll].docs_map[doc_id]
-                            if doc_id not in topic_candidates_map:
-                                topic_candidates_map[doc_id] = {
-                                    "id": doc_id,
-                                    "collection": coll,
-                                    "text": chunk_obj["text"],
-                                    "metadata": chunk_obj.get("metadata", {}),
-                                    "rrf_score": 1.0 / (60.0 + rank)
-                                }
-
-                # Dense поиск по теме
-                dense_hits = self.retriever._dense_search(coll, topic, top_k=6)
-                for rank, (doc_id, sim, meta, text) in enumerate(dense_hits):
-                    if doc_id not in topic_candidates_map:
-                        topic_candidates_map[doc_id] = {
-                            "id": doc_id,
-                            "collection": coll,
-                            "text": text,
-                            "metadata": meta,
-                            "rrf_score": 1.0 / (60.0 + rank)
-                        }
-
-        # Шаг 4: Ранжирование собранных ~40 кандидатов против оригинального вопроса
-        all_topic_candidates = list(topic_candidates_map.values())
-        ranked_topic_candidates = self.retriever._rerank_candidates(query, all_topic_candidates)
-
-        # Шаг 5: Отбор 5 лучших статей из тематического поиска (без дублирования стандартных)
-        topic_sources = []
-        seen_parents = set(standard_parent_ids)
-        seen_chunks = set(standard_chunk_ids)
-
-        for item in ranked_topic_candidates:
-            if len(topic_sources) >= 5:
-                break
-            meta = item.get("metadata", {})
-            p_id = meta.get("parent_id")
-            c_id = item["id"]
-
-            if p_id and p_id in seen_parents:
-                continue
-            if c_id in seen_chunks:
-                continue
-
-            parent_doc = self.retriever.parent_store.get(p_id, {})
-            title = parent_doc.get("title") or meta.get("title", "Документ")
-            clean_pid = p_id or c_id
-            url = f"?doc={clean_pid}#doc-legal_{clean_pid}" if "legal" in item.get("collection", "") else (parent_doc.get("url") or meta.get("url", "#"))
-
-            topic_sources.append({
-                "chunk_id": c_id,
-                "parent_id": p_id,
-                "collection": item["collection"],
-                "title": title,
-                "url": url,
-                "doc_type": meta.get("doc_type", "legal_law"),
-                "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
-                "date": parent_doc.get("date") or meta.get("date", ""),
-                "similarity_score": item.get("rerank_score", 0.0),
-                "matched_chunk": item["text"],
-                "source_tag": "topic_expansion"
-            })
-            if p_id:
-                seen_parents.add(p_id)
-            seen_chunks.add(c_id)
-
-        # Если уникальных не хватило до 5, добираем следующие лучшие
-        if len(topic_sources) < 5:
-            for item in ranked_topic_candidates:
-                if len(topic_sources) >= 5:
-                    break
-                c_id = item["id"]
-                if c_id not in seen_chunks:
-                    meta = item.get("metadata", {})
-                    p_id = meta.get("parent_id")
-                    parent_doc = self.retriever.parent_store.get(p_id, {})
-                    title = parent_doc.get("title") or meta.get("title", "Документ")
-                    clean_pid = p_id or c_id
-                    url = f"?doc={clean_pid}#doc-legal_{clean_pid}" if "legal" in item.get("collection", "") else (parent_doc.get("url") or meta.get("url", "#"))
-                    topic_sources.append({
-                        "chunk_id": c_id,
-                        "parent_id": p_id,
-                        "collection": item["collection"],
-                        "title": title,
-                        "url": url,
-                        "doc_type": meta.get("doc_type", "legal_law"),
-                        "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
-                        "date": parent_doc.get("date") or meta.get("date", ""),
-                        "similarity_score": item.get("rerank_score", 0.0),
-                        "matched_chunk": item["text"],
-                        "source_tag": "topic_expansion"
-                    })
-                    seen_chunks.add(c_id)
-
-        # Маркируем стандартные источники
+        # Маркируем стандартные источники и обновляем внутренние URL для просмотра в Streamlit
         for s in standard_sources:
             s["source_tag"] = "standard_retrieval"
-            # Обновляем URL для мгновенной адресации в Streamlit
             if s.get("parent_id") and s.get("collection") == COLLECTION_LAWS:
                 s["url"] = f"?doc={s['parent_id']}#doc-legal_{s['parent_id']}"
             elif s.get("parent_id") and s.get("collection") == COLLECTION_PDD:
                 s["url"] = f"?pdd={s['parent_id']}#doc-pdd_{s['parent_id']}"
 
-        # Объединяем источники: 5 стандартных + 5 тематических = 10 статей
+        # Шаг 2: Выделение 2-6 тем через Gemini
+        topics, gemini_connected = self.extract_topics(query, client=client or self.client)
+        logger.info(f"Gemini connected={gemini_connected} | Темы по вопросу: {topics}")
+
+        topic_sources: List[Dict[str, Any]] = []
+
+        # Если подключение к Gemini API успешно и выделены темы — расширяем пул до 10 источников
+        if gemini_connected and topics:
+            topic_candidates_map: Dict[str, Dict[str, Any]] = {}
+            target_colls = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_PDD]
+
+            for topic in topics:
+                for coll in target_colls:
+                    if coll in self.retriever.bm25_indices:
+                        hits = self.retriever.bm25_indices[coll].search(topic, top_k=6)
+                        for rank, (doc_id, bm_score) in enumerate(hits):
+                            if doc_id in self.retriever.bm25_indices[coll].docs_map:
+                                chunk_obj = self.retriever.bm25_indices[coll].docs_map[doc_id]
+                                if doc_id not in topic_candidates_map:
+                                    topic_candidates_map[doc_id] = {
+                                        "id": doc_id,
+                                        "collection": coll,
+                                        "text": chunk_obj["text"],
+                                        "metadata": chunk_obj.get("metadata", {}),
+                                        "rrf_score": 1.0 / (60.0 + rank)
+                                    }
+
+                    dense_hits = self.retriever._dense_search(coll, topic, top_k=6)
+                    for rank, (doc_id, sim, meta, text) in enumerate(dense_hits):
+                        if doc_id not in topic_candidates_map:
+                            topic_candidates_map[doc_id] = {
+                                "id": doc_id,
+                                "collection": coll,
+                                "text": text,
+                                "metadata": meta,
+                                "rrf_score": 1.0 / (60.0 + rank)
+                            }
+
+            all_topic_candidates = list(topic_candidates_map.values())
+            ranked_topic_candidates = self.retriever._rerank_candidates(query, all_topic_candidates)
+
+            seen_parents = set(standard_parent_ids)
+            seen_chunks = set(standard_chunk_ids)
+
+            for item in ranked_topic_candidates:
+                if len(topic_sources) >= 5:
+                    break
+                meta = item.get("metadata", {})
+                p_id = meta.get("parent_id")
+                c_id = item["id"]
+
+                if p_id and p_id in seen_parents:
+                    continue
+                if c_id in seen_chunks:
+                    continue
+
+                parent_doc = self.retriever.parent_store.get(p_id, {})
+                title = parent_doc.get("title") or meta.get("title", "Документ")
+                clean_pid = p_id or c_id
+                if item.get("collection") == COLLECTION_LAWS:
+                    url = f"?doc={clean_pid}#doc-legal_{clean_pid}"
+                elif item.get("collection") == COLLECTION_PDD:
+                    url = f"?pdd={clean_pid}#doc-pdd_{clean_pid}"
+                else:
+                    url = parent_doc.get("url") or meta.get("url", "#")
+
+                topic_sources.append({
+                    "chunk_id": c_id,
+                    "parent_id": p_id,
+                    "collection": item["collection"],
+                    "title": title,
+                    "url": url,
+                    "doc_type": meta.get("doc_type", "legal_law"),
+                    "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
+                    "date": parent_doc.get("date") or meta.get("date", ""),
+                    "similarity_score": item.get("rerank_score", 0.0),
+                    "matched_chunk": item["text"],
+                    "source_tag": "topic_expansion"
+                })
+                if p_id:
+                    seen_parents.add(p_id)
+                seen_chunks.add(c_id)
+
+            if len(topic_sources) < 5:
+                for item in ranked_topic_candidates:
+                    if len(topic_sources) >= 5:
+                        break
+                    c_id = item["id"]
+                    if c_id not in seen_chunks:
+                        meta = item.get("metadata", {})
+                        p_id = meta.get("parent_id")
+                        parent_doc = self.retriever.parent_store.get(p_id, {})
+                        title = parent_doc.get("title") or meta.get("title", "Документ")
+                        clean_pid = p_id or c_id
+                        if item.get("collection") == COLLECTION_LAWS:
+                            url = f"?doc={clean_pid}#doc-legal_{clean_pid}"
+                        elif item.get("collection") == COLLECTION_PDD:
+                            url = f"?pdd={clean_pid}#doc-pdd_{clean_pid}"
+                        else:
+                            url = parent_doc.get("url") or meta.get("url", "#")
+                        topic_sources.append({
+                            "chunk_id": c_id,
+                            "parent_id": p_id,
+                            "collection": item["collection"],
+                            "title": title,
+                            "url": url,
+                            "doc_type": meta.get("doc_type", "legal_law"),
+                            "case_number": parent_doc.get("case_number") or meta.get("case_number", ""),
+                            "date": parent_doc.get("date") or meta.get("date", ""),
+                            "similarity_score": item.get("rerank_score", 0.0),
+                            "matched_chunk": item["text"],
+                            "source_tag": "topic_expansion"
+                        })
+                        seen_chunks.add(c_id)
+
+        # Объединяем источники: 10 при успешном подключении к Gemini, иначе ТОЛЬКО 5 базовых фрагментов
         final_sources = standard_sources + topic_sources
         for idx, s in enumerate(final_sources, 1):
             s["citation_id"] = idx
@@ -325,8 +309,7 @@ class RAGAssistant:
 
         formatted_context = "\n---\n".join(context_blocks)
 
-        # Формируем итоговый user_prompt
-        user_prompt = f"""КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ КОМПАНИИ (10 ПРОВЕРЕННЫХ ПЕРВОИСТОЧНИКОВ):
+        user_prompt = f"""КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ КОМПАНИИ ({len(final_sources)} ПРОВЕРЕННЫХ ПЕРВОИСТОЧНИКОВ):
 {formatted_context}
 """
         if attached_doc_text.strip():
@@ -346,6 +329,7 @@ class RAGAssistant:
         return {
             "query": query,
             "topics": topics,
+            "gemini_connected": gemini_connected,
             "standard_count": len(standard_sources),
             "topic_count": len(topic_sources),
             "total_count": len(final_sources),
@@ -406,7 +390,7 @@ class RAGAssistant:
         return {"answer": "", "status": "empty_response", "error": "Пустой ответ"}
 
     def answer_query(self, query: str, attached_doc_text: str = "") -> Dict[str, Any]:
-        """Полный цикл RAG: двухэтапный поиск 10 статей + генерация ответа"""
+        """Полный цикл RAG: 10 статей при работе с Gemini или строго 5 базовых фрагментов при сбое подключения"""
         ctx_data = self.prepare_10_sources_context(query, attached_doc_text=attached_doc_text)
         sources = ctx_data["sources"]
         user_prompt = ctx_data["user_prompt"]
@@ -422,6 +406,9 @@ class RAGAssistant:
             if not fallback_reason:
                 fallback_reason = "Ответ от Gemini пуст или заблокирован фильтрами"
             _log_gemini_error("FALLBACK_ACTIVATED", query, fallback_reason)
+            # Если не удалось подключиться к Gemini API — оставляем строго 5 базовых фрагментов
+            sources = [s for s in sources if s.get("source_tag") == "standard_retrieval"][:5] or sources[:5]
+            topics = []
             answer_text = self._extractive_fallback_generation(query, sources, reason=fallback_reason)
 
         return {

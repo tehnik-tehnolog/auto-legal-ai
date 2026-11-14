@@ -1,9 +1,12 @@
 """
 Streamlit Web-приложение для юридического RAG-ассистента компании по раскату машин в РФ.
-Разделы боковой панели:
-  1. 💬 RAG Ассистент (Чат) - с темами чатов, пиннингом, профилями юристов, прикреплением файлов (PDF/DOCX/TXT)
-  2. 📜 Нормативная база (ГК/НК РФ) - с умной выборкой (список при >1 статьи, полная статья при 1)
-  3. 🚦 Правила дорожного движения (ПДД РФ)
+Готово к деплою на Render.com (Free Tier без локального диска, с пробуждением по WEBHOOK_BASE_URL):
+  - Регистрация и вход пользователей по Email + Имени (хранение в Supabase PostgreSQL)
+  - Хранение прикрепленных документов и синхронизация БЗ через Backblaze B2 Cloud Storage
+  - Иконки светлой и темной темы из папки ui/ (court, regulatory, pdd, pin, unpin, rename, remove, add_file)
+  - Кнопка прикрепления файла справа от поля ввода промпта (как в мессенджере)
+  - 3 раздела боковой панели: Чат, Нормативная база (ГК/НК РФ), ПДД РФ
+  - Двухэтапный поиск (10 статей с Gemini; строго 5 базовых фрагментов при сбое подключения к Gemini API)
 """
 
 import io
@@ -11,46 +14,121 @@ import json
 import logging
 import os
 import re
-import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
-from rag_pipeline.chat_manager import DEFAULT_USERS, ChatManager
+from rag_pipeline.b2_storage import B2StorageManager
+from rag_pipeline.chat_manager import ChatManager
 from rag_pipeline.config import (
+    DATA_DIR,
     GEMINI_API_KEY,
     LEGAL_CHAPTERS_FILE,
-    LEGAL_DIR,
     LEGAL_JSONL_FILE,
-    LOGS_DIR,
     MODEL_NAME,
     PDD_CHAPTERS_FILE,
-    PDD_DIR,
-    PDD_RULES_FILE,
+    WEBHOOK_BASE_URL,
 )
+from rag_pipeline.db_supabase import SupabaseChatDB
 from rag_pipeline.generator import RAGAssistant, SYSTEM_PROMPT
+from rag_pipeline.ui_icons import build_ui_icons_css, detect_streamlit_theme, icon_img_html
+
+logger = logging.getLogger("streamlit_app")
 
 # Настройка страницы Streamlit
 st.set_page_config(
-    page_title="Юридический RAG Ассистент | Раскат Авто РФ",
+    page_title="Юридический Ассистент для РФ",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Глобальный реестр фоновых задач генерации (для непрерывности при переходах по разделам)
+# Определение темы и подключение пользовательских SVG-иконок из ui/light и ui/dark
+ACTIVE_THEME = detect_streamlit_theme(st)
+st.markdown(build_ui_icons_css(ACTIVE_THEME), unsafe_allow_html=True)
+
+# Глобальный реестр фоновых задач генерации (не прерывается при переходах между разделами)
 if "GLOBAL_JOBS" not in st.session_state:
     st.session_state.GLOBAL_JOBS = {}
 GLOBAL_JOBS = st.session_state.GLOBAL_JOBS
 
 
+# --- ИНИЦИАЛИЗАЦИЯ ОБЛАЧНЫХ РЕСУРСОВ (1 раз на старт контейнера Render) ---
+@st.cache_resource
+def bootstrap_cloud_and_rag() -> Dict[str, Any]:
+    """Инициализация Supabase, гидратация данных из Backblaze B2 и кэширование RAGAssistant."""
+    db_ok = SupabaseChatDB.init_schema() if SupabaseChatDB.is_configured() else False
+    b2_sync = {"configured": B2StorageManager.is_configured(), "downloaded": 0}
+    # Если на эфемерном диске Render отсутствуют основные файлы БЗ, подтягиваем из Backblaze B2
+    if B2StorageManager.is_configured() and (not LEGAL_CHAPTERS_FILE.exists() or not PDD_CHAPTERS_FILE.exists()):
+        b2_sync = B2StorageManager.sync_kb_from_b2(DATA_DIR)
+
+    assistant = RAGAssistant()
+    return {
+        "db_ok": db_ok,
+        "b2_sync": b2_sync,
+        "assistant": assistant,
+    }
+
+
+CLOUD_BOOT = bootstrap_cloud_and_rag()
+
+
+def get_rag_assistant() -> RAGAssistant:
+    return CLOUD_BOOT["assistant"]
+
+
+# --- ПРОБУЖДЕНИЕ ПРОЦЕССА RENDER ПО WEBHOOK_BASE_URL ---
+def trigger_render_wakeup():
+    """Отправка wake-up запроса на Render WEBHOOK_BASE_URL при отправке сообщения в чате."""
+    if not WEBHOOK_BASE_URL:
+        return
+
+    def _ping():
+        for suffix in ("/_stcore/health", "/"):
+            try:
+                requests.get(f"{WEBHOOK_BASE_URL}{suffix}", timeout=8)
+                break
+            except Exception:
+                continue
+
+    threading.Thread(target=_ping, daemon=True).start()
+
+
+def inject_client_wakeup_hook():
+    """JS-хук пробуждения Render при возврате пользователя на вкладку после сна."""
+    if not WEBHOOK_BASE_URL:
+        return
+    safe_url = json.dumps(f"{WEBHOOK_BASE_URL}/_stcore/health")
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const wakeUrl = {safe_url};
+            if (!window.__renderWakeBound) {{
+                window.__renderWakeBound = true;
+                document.addEventListener("visibilitychange", function() {{
+                    if (document.visibilityState === "visible") {{
+                        fetch(wakeUrl, {{ mode: "no-cors", cache: "no-store" }}).catch(() => {{}});
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 # --- ИЗВЛЕЧЕНИЕ ТЕКСТА ИЗ ПРИКРЕПЛЕННЫХ ФАЙЛОВ ---
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
-    """Извлечение текстового содержимого из PDF, DOCX, TXT и MD файлов"""
+    """Извлечение текстового содержимого из PDF, DOCX, TXT и MD файлов."""
     lower_name = filename.lower()
     try:
         if lower_name.endswith(".pdf"):
@@ -75,19 +153,30 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
         return f"[Ошибка извлечения текста из файла {filename}: {e}]"
 
 
-# --- ФОНОВЫЙ ПОТОК ГЕНЕРАЦИИ (НЕ ПРЕРЫВАЕТСЯ ПРИ СМЕНЕ СТРАНИЦ) ---
-def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_id: str, chat_id: str):
-    """Фоновый воркер: двухэтапный поиск 10 статей + вызов Gemini"""
+# --- ФОНОВЫЙ ПОТОК ГЕНЕРАЦИИ (НЕ ПРЕРЫВАЕТСЯ ПРИ СМЕНЕ РАЗДЕЛОВ) ---
+def _run_background_rag_task(
+    job_id: str,
+    query: str,
+    attached_text: str,
+    user_email: str,
+    chat_id: str,
+    assistant: RAGAssistant,
+):
+    """
+    Фоновый воркер:
+    - При подключенном Gemini API: 10 статей (5 базовых + 5 тематических).
+    - Если не вышло подключиться к Gemini API: строго 5 базовых фрагментов.
+    """
     try:
         GLOBAL_JOBS[job_id]["status"] = "retrieving"
-        assistant = RAGAssistant()
 
-        # 1. Сбор 10 первоисточников (5 стандартных + 5 из расширения тем через Gemini)
+        # 1. Сбор контекста (10 статей при рабочем Gemini или 5 при отсутствии подключения)
         ctx_data = assistant.prepare_10_sources_context(query, attached_doc_text=attached_text)
         sources = ctx_data["sources"]
         topics = ctx_data["topics"]
         user_prompt = ctx_data["user_prompt"]
         targets = ctx_data.get("target_collections", [])
+        gemini_connected = ctx_data.get("gemini_connected", False)
 
         GLOBAL_JOBS[job_id]["status"] = "generating"
         GLOBAL_JOBS[job_id]["sources"] = sources
@@ -100,7 +189,6 @@ def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_i
         fallback_reason = None
         gemini_status = "ok"
 
-        # Проверка и вызов клиента Google GenAI
         api_key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
         if api_key:
             try:
@@ -112,7 +200,7 @@ def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_i
                     config={
                         "system_instruction": SYSTEM_PROMPT,
                         "temperature": 0.2,
-                    }
+                    },
                 )
                 answer_text = response.text or ""
             except Exception as gemini_err:
@@ -122,11 +210,19 @@ def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_i
             fallback_reason = "GEMINI_API_KEY не задан в переменных окружения или файле .env"
             gemini_status = "missing_key"
 
+        # Если не вышло подключиться к Gemini API -> оставляем ТОЛЬКО 5 базовых фрагментов
         if not answer_text:
             fallback_used = True
+            if not fallback_reason:
+                fallback_reason = "Пустой ответ от Gemini API"
+            sources = [s for s in sources if s.get("source_tag") == "standard_retrieval"][:5] or sources[:5]
+            topics = []
             answer_text = assistant._extractive_fallback_generation(query, sources, reason=fallback_reason)
+        elif not gemini_connected:
+            # Если этап 1 не смог подключиться к Gemini, в sources уже только 5 фрагментов
+            sources = sources[:5]
 
-        GLOBAL_JOBS[job_id]["result"] = {
+        result_payload = {
             "answer": answer_text,
             "sources": sources,
             "topics": topics,
@@ -135,6 +231,23 @@ def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_i
             "fallback_reason": fallback_reason,
             "gemini_status": gemini_status,
         }
+
+        # Сохраняем результат в Supabase прямо из фонового потока (чтобы не потерять при переходах)
+        saved_in_db = False
+        if ChatManager.is_cloud_db_active():
+            msg_record = {
+                "role": "assistant",
+                "content": answer_text,
+                "sources": sources,
+                "topics": topics,
+                "targets": targets,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+            }
+            saved_in_db = SupabaseChatDB.append_message(chat_id, msg_record)
+
+        GLOBAL_JOBS[job_id]["saved_in_db"] = saved_in_db
+        GLOBAL_JOBS[job_id]["result"] = result_payload
         GLOBAL_JOBS[job_id]["status"] = "completed"
 
     except Exception as fatal_err:
@@ -144,7 +257,7 @@ def _run_background_rag_task(job_id: str, query: str, attached_text: str, user_i
 
 # --- ФУНКЦИИ ЗАГРУЗКИ НОРМ И ПДД ---
 @st.cache_data(ttl=60)
-def load_legal_chapters():
+def load_legal_chapters() -> List[Dict[str, Any]]:
     docs = []
     target = LEGAL_CHAPTERS_FILE if LEGAL_CHAPTERS_FILE.exists() else LEGAL_JSONL_FILE
     if target.exists():
@@ -160,7 +273,7 @@ def load_legal_chapters():
 
 
 @st.cache_data(ttl=60)
-def load_pdd_chapters():
+def load_pdd_chapters() -> List[Dict[str, Any]]:
     chapters = []
     if PDD_CHAPTERS_FILE.exists():
         try:
@@ -174,137 +287,238 @@ def load_pdd_chapters():
     return chapters
 
 
-# --- ОБРАБОТКА URL QUERY PARAMETERS (?doc=... или ?pdd=...) ---
-# Решает проблему прямых ссылок из чата и браузера
+def inject_user_into_internal_links(markdown_text: str, user_email: str) -> str:
+    """Добавляет параметр u={email} в ссылки ?doc=... и ?pdd=..., чтобы при клике не сбрасывалась сессия."""
+    if not user_email or not markdown_text:
+        return markdown_text
+    enc_u = urllib.parse.quote(user_email, safe="")
+    updated = re.sub(r"\?doc=([a-zA-Z0-9_.-]+)", rf"?u={enc_u}&doc=\1", markdown_text)
+    updated = re.sub(r"\?pdd=([a-zA-Z0-9_.-]+)", rf"?u={enc_u}&pdd=\1", updated)
+    return updated
+
+
+# --- ОБРАБОТКА URL QUERY PARAMETERS (?u=..., ?doc=..., ?pdd=...) ---
 query_params = st.query_params
 
+if "u" in query_params and not st.session_state.get("current_user_email"):
+    raw_u = str(query_params.get("u", "")).strip().lower()
+    if "@" in raw_u:
+        st.session_state.current_user_email = raw_u
+
+has_direct_doc_link = False
 if "doc" in query_params:
     raw_doc_id = str(query_params.get("doc", "")).strip()
-    clean_doc_id = re.sub(r'^(?:#?doc-legal_|#?legal_|#)', '', raw_doc_id)
+    clean_doc_id = re.sub(r"^(?:#?doc-legal_|#?legal_|#)", "", raw_doc_id)
     if clean_doc_id:
-        st.session_state.app_sidebar_radio = "📜 Нормативная база (ГК/НК РФ)"
         st.session_state.current_nav = "📜 Нормативная база (ГК/НК РФ)"
         st.session_state.active_legal_doc_id = clean_doc_id
+        has_direct_doc_link = True
 
 if "pdd" in query_params:
     raw_pdd_id = str(query_params.get("pdd", "")).strip()
-    clean_pdd_id = re.sub(r'^(?:#?doc-pdd_|#?pdd_|#)', '', raw_pdd_id)
+    clean_pdd_id = re.sub(r"^(?:#?doc-pdd_|#?pdd_|#)", "", raw_pdd_id)
     if clean_pdd_id:
-        st.session_state.app_sidebar_radio = "🚦 Правила дорожного движения (ПДД РФ)"
         st.session_state.current_nav = "🚦 Правила дорожного движения (ПДД РФ)"
         st.session_state.active_pdd_doc_id = clean_pdd_id
+        has_direct_doc_link = True
 
 
-# --- УПРАВЛЕНИЕ ПРОФИЛЕМ ПОЛЬЗОВАТЕЛЯ И ТЕМАМИ ЧАТОВ ---
-if "current_user_id" not in st.session_state:
-    st.session_state.current_user_id = DEFAULT_USERS[0]["user_id"]
+# --- ЭКРАН РЕГИСТРАЦИИ / ВХОДА ПО EMAIL + ИМЕНИ ---
+def render_auth_gate():
+    col_left, col_mid, col_right = st.columns([1, 2, 1])
+    with col_mid:
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:10px;margin-top:2rem;'>"
+            f"{icon_img_html('court', size=34, theme=ACTIVE_THEME)}"
+            f"<h1 style='margin:0;font-size:1.9rem;'>Раскат Авто РФ — RAG Ассистент</h1>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Вход и быстрая регистрация сотрудников юридического отдела по Email")
 
-current_user_id = st.session_state.current_user_id
-user_profile = ChatManager.load_user_profile(current_user_id)
-active_chat = ChatManager.get_active_chat(user_profile)
+        with st.container(border=True):
+            st.subheader("Вход или регистрация нового пользователя")
+            st.write("Введите ваше имя и рабочую почту. Новые учетные записи создаются автоматически без подтверждения по письму.")
+
+            with st.form("email_register_login_form"):
+                name_val = st.text_input("Имя (например: Иван Петров)", placeholder="Иван Петров")
+                email_val = st.text_input("Email", placeholder="lawyer@company.ru")
+                submitted = st.form_submit_button("Войти / Зарегистрироваться", type="primary", use_container_width=True)
+
+            if submitted:
+                clean_email = email_val.strip().lower()
+                clean_name = name_val.strip()
+                if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean_email):
+                    st.error("Пожалуйста, введите корректный адрес электронной почты (например: user@company.ru).")
+                elif not clean_name:
+                    st.error("Пожалуйста, введите ваше имя.")
+                else:
+                    profile = ChatManager.register_or_login(clean_email, clean_name)
+                    st.session_state.current_user_email = profile.get("email", clean_email)
+                    st.session_state.current_user_name = profile.get("user_name", clean_name)
+                    st.query_params["u"] = st.session_state.current_user_email
+                    st.rerun()
+
+            known_users = ChatManager.list_known_users()
+            if known_users:
+                st.divider()
+                st.caption("Ранее входившие пользователи:")
+                cols = st.columns(min(len(known_users), 3))
+                for idx, ku in enumerate(known_users[:6]):
+                    u_email = ku.get("email") or ku.get("user_id")
+                    u_name = ku.get("user_name") or u_email
+                    with cols[idx % len(cols)]:
+                        if st.button(f"{u_name}", key=f"quick_login_{idx}_{u_email}", use_container_width=True):
+                            st.session_state.current_user_email = u_email
+                            st.session_state.current_user_name = u_name
+                            st.query_params["u"] = u_email
+                            st.rerun()
 
 
-# --- SIDEBAR: ТОЛЬКО 3 РАЗДЕЛА + ТЕМЫ ЧАТОВ И ПИННИНГ ---
+# Если пользователь не авторизован и не открывает прямую ссылку на статью (?doc= / ?pdd=) — показываем экран регистрации
+if not st.session_state.get("current_user_email") and not has_direct_doc_link:
+    render_auth_gate()
+    st.stop()
+
+
+# Загружаем профиль авторизованного пользователя (если есть)
+current_user_email = st.session_state.get("current_user_email", "")
+current_user_name = st.session_state.get("current_user_name", "")
+user_profile: Optional[Dict[str, Any]] = None
+active_chat: Optional[Dict[str, Any]] = None
+
+if current_user_email:
+    user_profile = ChatManager.load_user_profile(current_user_email, current_user_name or "Юрист")
+    active_chat = ChatManager.get_active_chat(user_profile)
+    st.session_state.current_user_name = user_profile.get("user_name", current_user_name)
+
+# Инициализация активной вкладки навигации
+if "current_nav" not in st.session_state:
+    st.session_state.current_nav = "💬 RAG Ассистент (Чат)"
+
+# Встраиваем клиентский хук пробуждения Render
+inject_client_wakeup_hook()
+
+
+# --- SIDEBAR: ТОЛЬКО 3 РАЗДЕЛА С КАСТОМНЫМИ SVG-ИКОНКАМИ + ПРОФИЛЬ + ТЕМЫ ЧАТОВ ---
 with st.sidebar:
-    st.title("⚖️ Раскат Авто РФ")
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>"
+        f"{icon_img_html('court', size=26, theme=ACTIVE_THEME)}"
+        f"<span style='font-size:1.35rem;font-weight:700;'>Раскат Авто РФ</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
     st.caption("Юридический RAG-ассистент и нормативная база")
 
-    # 1. Выбор профиля юриста
-    user_options = {u["user_id"]: u["user_name"] for u in DEFAULT_USERS}
-    selected_u_id = st.selectbox(
-        "👤 Юрист (профиль):",
-        options=list(user_options.keys()),
-        format_func=lambda uid: user_options.get(uid, uid),
-        index=list(user_options.keys()).index(current_user_id) if current_user_id in user_options else 0,
-        key="sidebar_user_selector"
-    )
-    if selected_u_id != current_user_id:
-        st.session_state.current_user_id = selected_u_id
-        st.rerun()
-
-    st.divider()
-
-    # 2. Навигация (ОСТАВЛЕНЫ ТОЛЬКО 3 РАЗДЕЛА)
-    nav_options = [
-        "💬 RAG Ассистент (Чат)",
-        "📜 Нормативная база (ГК/НК РФ)",
-        "🚦 Правила дорожного движения (ПДД РФ)",
-    ]
-
-    if "current_nav" not in st.session_state:
-        st.session_state.current_nav = "💬 RAG Ассистент (Чат)"
-
-    try:
-        radio_idx = nav_options.index(st.session_state.current_nav)
-    except ValueError:
-        radio_idx = 0
-
-    selected_view = st.radio(
-        "Раздел:",
-        nav_options,
-        index=radio_idx,
-        key="app_sidebar_radio"
-    )
-    st.session_state.current_nav = selected_view
-
-    st.divider()
-
-    # 3. Управление темами чатов
-    col_t1, col_t2 = st.columns([3, 1])
-    with col_t1:
-        st.subheader("📁 Темы чатов")
-    with col_t2:
-        if st.button("➕", help="Создать новый чат", key="btn_create_chat"):
-            new_c_id = ChatManager.create_new_chat(user_profile)
+    # 1. Профиль текущего пользователя (Supabase / локальный fallback)
+    if user_profile:
+        with st.container(border=True):
+            st.markdown(f"**{user_profile.get('user_name', 'Юрист')}**")
+            st.caption(f"{user_profile.get('email', current_user_email)}")
+            if st.button("Сменить пользователя / Выйти", key="btn_logout_user", use_container_width=True):
+                st.session_state.pop("current_user_email", None)
+                st.session_state.pop("current_user_name", None)
+                st.session_state.pop("active_job_id", None)
+                if "u" in st.query_params:
+                    del st.query_params["u"]
+                st.rerun()
+    else:
+        if st.button("Войти / Зарегистрироваться", key="btn_guest_login", type="primary", use_container_width=True):
+            if "doc" in st.query_params:
+                del st.query_params["doc"]
+            if "pdd" in st.query_params:
+                del st.query_params["pdd"]
             st.rerun()
 
-    all_chats = user_profile.get("chats", [])
-    pinned_chats = [c for c in all_chats if c.get("pinned", False)]
-    recent_chats = [c for c in all_chats if not c.get("pinned", False)]
+    st.divider()
 
-    # Закрепленные чаты (Pinned)
-    if pinned_chats:
-        st.caption("📌 Закрепленные чаты:")
-        for c in pinned_chats:
+    # 2. Навигация (ОСТАВЛЕНЫ ТОЛЬКО 3 РАЗДЕЛА с SVG-иконками ui/)
+    nav_items = [
+        ("💬 RAG Ассистент (Чат)", "Ассистент (Чат)", "nav_btn_chat"),
+        ("📜 Нормативная база (ГК/НК РФ)", "Нормативная база", "nav_btn_legal"),
+        ("🚦 Правила дорожного движения (ПДД РФ)", "Правила дорожного движения", "nav_btn_pdd"),
+    ]
+    for nav_id, nav_label, btn_key in nav_items:
+        is_current = st.session_state.current_nav == nav_id
+        if st.button(
+            nav_label,
+            key=btn_key,
+            type="primary" if is_current else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.current_nav = nav_id
+            st.rerun()
+
+    selected_view = st.session_state.current_nav
+
+    # 3. Управление темами чатов (только если пользователь авторизован)
+    if user_profile:
+        st.divider()
+        col_t1, col_t2 = st.columns([3, 1])
+        with col_t1:
+            st.subheader("Темы чатов")
+        with col_t2:
+            if st.button("➕", help="Создать новый чат", key="btn_create_chat"):
+                ChatManager.create_new_chat(user_profile)
+                st.session_state.renaming_chat_id = None
+                st.rerun()
+
+        all_chats = user_profile.get("chats", [])
+        pinned_chats = [c for c in all_chats if c.get("pinned", False)]
+        recent_chats = [c for c in all_chats if not c.get("pinned", False)]
+
+        def _render_chat_row(c: Dict[str, Any], is_pinned_section: bool):
             c_id = c["chat_id"]
-            is_active = (c_id == user_profile.get("active_chat_id"))
-            label = f"📌 {c['title']}"
-            cols = st.columns([5, 1, 1])
+            is_active = c_id == user_profile.get("active_chat_id")
+            cols = st.columns([4.6, 1, 1, 1])
             with cols[0]:
                 btn_type = "primary" if is_active else "secondary"
-                if st.button(label, key=f"chat_btn_{c_id}", use_container_width=True, type=btn_type):
-                    user_profile["active_chat_id"] = c_id
-                    ChatManager.save_user_profile(user_profile)
+                if st.button(c["title"], key=f"chat_btn_{c_id}", use_container_width=True, type=btn_type):
+                    ChatManager.set_active_chat(user_profile, c_id)
+                    st.session_state.current_nav = "💬 RAG Ассистент (Чат)"
                     st.rerun()
             with cols[1]:
-                if st.button("📍", help="Открепить чат", key=f"unpin_{c_id}"):
-                    ChatManager.toggle_pin(user_profile, c_id)
-                    st.rerun()
+                if is_pinned_section:
+                    if st.button(" ", help="Открепить чат", key=f"unpin_btn_{c_id}", use_container_width=True):
+                        ChatManager.toggle_pin(user_profile, c_id)
+                        st.rerun()
+                else:
+                    if st.button(" ", help="Закрепить чат", key=f"pin_btn_{c_id}", use_container_width=True):
+                        ChatManager.toggle_pin(user_profile, c_id)
+                        st.rerun()
             with cols[2]:
-                if st.button("🗑️", help="Удалить чат", key=f"del_pin_{c_id}"):
+                if st.button(" ", help="Переименовать чат", key=f"rename_btn_{c_id}", use_container_width=True):
+                    if st.session_state.get("renaming_chat_id") == c_id:
+                        st.session_state.renaming_chat_id = None
+                    else:
+                        st.session_state.renaming_chat_id = c_id
+                    st.rerun()
+            with cols[3]:
+                del_key = f"del_pin_btn_{c_id}" if is_pinned_section else f"del_btn_{c_id}"
+                if st.button(" ", help="Удалить чат", key=del_key, use_container_width=True):
                     ChatManager.delete_chat(user_profile, c_id)
                     st.rerun()
 
-    # Обычные темы чатов
-    st.caption("🕒 Недавние диалоги:")
-    for c in recent_chats[:8]:
-        c_id = c["chat_id"]
-        is_active = (c_id == user_profile.get("active_chat_id"))
-        cols = st.columns([5, 1, 1])
-        with cols[0]:
-            btn_type = "primary" if is_active else "secondary"
-            if st.button(c['title'], key=f"chat_btn_{c_id}", use_container_width=True, type=btn_type):
-                user_profile["active_chat_id"] = c_id
-                ChatManager.save_user_profile(user_profile)
-                st.rerun()
-        with cols[1]:
-            if st.button("📌", help="Закрепить чат", key=f"pin_{c_id}"):
-                ChatManager.toggle_pin(user_profile, c_id)
-                st.rerun()
-        with cols[2]:
-            if st.button("🗑️", help="Удалить чат", key=f"del_{c_id}"):
-                ChatManager.delete_chat(user_profile, c_id)
-                st.rerun()
+            if st.session_state.get("renaming_chat_id") == c_id:
+                new_t = st.text_input("Новое название:", value=c["title"], key=f"rename_inp_{c_id}", label_visibility="collapsed")
+                rc1, rc2 = st.columns(2)
+                if rc1.button("Сохранить", key=f"save_ren_{c_id}", use_container_width=True):
+                    ChatManager.rename_chat(user_profile, c_id, new_t)
+                    st.session_state.renaming_chat_id = None
+                    st.rerun()
+                if rc2.button("Отмена", key=f"canc_ren_{c_id}", use_container_width=True):
+                    st.session_state.renaming_chat_id = None
+                    st.rerun()
+
+        if pinned_chats:
+            st.caption("Закрепленные чаты:")
+            for c in pinned_chats:
+                _render_chat_row(c, is_pinned_section=True)
+
+        st.caption("Недавние диалоги:")
+        for c in recent_chats[:10]:
+            _render_chat_row(c, is_pinned_section=False)
 
     st.divider()
 
@@ -313,69 +527,89 @@ with st.sidebar:
     pdd_chapters = load_pdd_chapters()
     tax_cnt = sum(1 for d in legal_chapters if "НК" in str(d.get("code", "")) or "tax" in str(d.get("parent_id", "")))
     civics_cnt = sum(1 for d in legal_chapters if "ГК" in str(d.get("code", "")) or "civics" in str(d.get("parent_id", "")))
-    st.caption(f"📚 В базе: **{len(legal_chapters)}** статей (ГК: {civics_cnt}, НК: {tax_cnt}) | **{len(pdd_chapters)}** глав ПДД")
+    st.caption(f"В базе: **{len(legal_chapters)}** статей (ГК: {civics_cnt}, НК: {tax_cnt}) | **{len(pdd_chapters)}** глав ПДД")
 
 
 # ==============================================================================
-# VIEW 1: ЧАТ RAG-АССИСТЕНТА С ПРИКРЕПЛЕНИЕМ ФАЙЛОВ И ДВУХЭТАПНЫМ ПОИСКОМ
+# VIEW 1: ЧАТ RAG-АССИСТЕНТА С ПРИКРЕПЛЕНИЕМ ФАЙЛОВ СПРАВА ОТ ВВОДА И 5/10 СЦЕНАРИЕМ
 # ==============================================================================
 if selected_view == "💬 RAG Ассистент (Чат)":
-    st.header(f"💬 {active_chat.get('title', 'Чат RAG-ассистента')}")
-    st.caption("Конвейер: Вопрос ➔ Gemini (2-6 тем) ➔ Поиск ~40 статей ➔ Реранкинг ➔ 10 первоисточников ➔ Ответ")
+    if not user_profile or not active_chat:
+        render_auth_gate()
+        st.stop()
 
-    # Отображение истории сообщений активного чата
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:2px;'>"
+        f"{icon_img_html('court', size=26, theme=ACTIVE_THEME)}"
+        f"<h2 style='margin:0;'>{active_chat.get('title', 'Чат RAG-ассистента')}</h2>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Конвейер: Вопрос ➔ Gemini (2-6 тем) ➔ Поиск ~40 статей ➔ Реранкинг ➔ 10 первоисточников (или 5 базовых фрагментов без Gemini API)")
+
     messages = active_chat.get("messages", [])
 
-    for msg in messages:
+    for msg_idx, msg in enumerate(messages):
         with st.chat_message(msg["role"]):
             if msg.get("topics"):
-                st.caption(f"🔎 **Выделенные темы вопроса (Gemini):** {' • '.join([f'`{t}`' for t in msg['topics']])}")
+                st.caption(f"Выделенные темы вопроса (Gemini): {' • '.join([f'`{t}`' for t in msg['topics']])}")
 
             if msg.get("targets"):
                 target_labels = {
-                    "legal_laws": "📜 Законы (ГК/НК РФ)",
-                    "court_cases": "⚖️ ВС РФ (Судебная практика)",
-                    "auto_news": "📰 Автоновости и рынок",
-                    "traffic_rules": "🚦 ПДД РФ"
+                    "legal_laws": "Законы (ГК/НК РФ)",
+                    "court_cases": "ВС РФ (Судебная практика)",
+                    "auto_news": "Автоновости и рынок",
+                    "traffic_rules": "ПДД РФ",
                 }
                 badges = [target_labels.get(t, t) for t in msg["targets"]]
-                st.caption(f"🎯 **Коллекции поиска:** {' • '.join(badges)}")
+                st.caption(f"Коллекции поиска: {' • '.join(badges)}")
 
             if msg.get("attached_filename"):
-                st.info(f"📎 **Прикрепленный документ:** `{msg['attached_filename']}` ({msg.get('attached_chars', 0)} знаков)")
+                b2_key = msg.get("attached_b2_key")
+                info_line = f"Прикрепленный документ: `{msg['attached_filename']}` ({msg.get('attached_chars', 0)} знаков)"
+                if b2_key and B2StorageManager.is_configured():
+                    presigned = B2StorageManager.get_presigned_url(b2_key)
+                    if presigned:
+                        info_line += f" • [Скачать из Backblaze B2]({presigned})"
+                st.info(info_line)
 
             if msg.get("fallback_used"):
-                with st.expander("ℹ️ Статус подключения Gemini (загружен локальный генератор)"):
-                    st.warning(f"Причина вызова локального синтеза: **{msg.get('fallback_reason')}**")
+                with st.expander("Статус подключения Gemini (активирован сценарий из 5 базовых фрагментов)"):
+                    st.warning(f"Причина переключения на локальный синтез: **{msg.get('fallback_reason')}**")
                     st.caption("Подробный лог сохранен в: `logs/gemini_connection.log`")
 
-            st.markdown(msg["content"])
+            rendered_md = inject_user_into_internal_links(msg["content"], current_user_email)
+            st.markdown(rendered_md)
 
-            if msg.get("sources"):
-                with st.expander(f"📚 Использованные первоисточники (10 документов): 5 базовых + 5 тематических"):
-                    for s_idx, s in enumerate(msg["sources"]):
+            sources = msg.get("sources") or []
+            if sources:
+                if len(sources) <= 5 or msg.get("fallback_used"):
+                    exp_title = f"Использованные первоисточники ({len(sources)} базовых фрагментов)"
+                else:
+                    exp_title = f"Использованные первоисточники ({len(sources)} документов): 5 базовых + {len(sources) - 5} тематических"
+
+                with st.expander(exp_title):
+                    for s_idx, s in enumerate(sources):
                         col_a, col_b = st.columns([3, 1])
                         with col_a:
-                            tag_badge = "🌟 [Тематическое расширение]" if s.get("source_tag") == "topic_expansion" else "📌 [Базовый поиск]"
-                            st.markdown(f"**[{s['title']}]({s['url']})** {tag_badge}")
+                            tag_badge = "[Тематическое расширение]" if s.get("source_tag") == "topic_expansion" else "[Базовый поиск]"
+                            src_url = inject_user_into_internal_links(s.get("url", "#"), current_user_email)
+                            st.markdown(f"**[{s['title']}]({src_url})** `{tag_badge}`")
                             if s.get("case_number"):
                                 st.caption(f"Дело №: {s['case_number']} | Дата: {s.get('date', 'Не указана')}")
                             st.text(f"Фрагмент: {s['matched_chunk'][:240]}...")
 
-                            # Кнопка мгновенного перехода в просмотрщик статей
                             coll = s.get("collection", "")
                             doc_t = s.get("doc_type", "")
                             p_id = s.get("parent_id")
                             if (coll == "legal_laws" or doc_t == "legal_law") and p_id:
-                                if st.button(f"📖 Открыть статью в просмотрщике", key=f"hist_legal_{p_id}_{s_idx}"):
-                                    st.session_state.app_sidebar_radio = "📜 Нормативная база (ГК/НК РФ)"
+                                if st.button("Открыть статью в просмотрщике", key=f"hist_legal_{msg_idx}_{p_id}_{s_idx}"):
                                     st.session_state.current_nav = "📜 Нормативная база (ГК/НК РФ)"
                                     st.session_state.active_legal_doc_id = p_id
                                     st.query_params["doc"] = p_id
                                     st.rerun()
                             elif (coll == "traffic_rules" or doc_t == "traffic_rules") and p_id:
-                                if st.button(f"🚦 Открыть главу ПДД в просмотрщике", key=f"hist_pdd_{p_id}_{s_idx}"):
-                                    st.session_state.app_sidebar_radio = "🚦 Правила дорожного движения (ПДД РФ)"
+                                if st.button("Открыть главу ПДД в просмотрщике", key=f"hist_pdd_{msg_idx}_{p_id}_{s_idx}"):
                                     st.session_state.current_nav = "🚦 Правила дорожного движения (ПДД РФ)"
                                     st.session_state.active_pdd_doc_id = p_id
                                     st.query_params["pdd"] = p_id
@@ -385,16 +619,16 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                             st.metric("Rerank Score", f"{s.get('similarity_score', 0.0):.3f}")
                         st.divider()
 
-    # Проверка активного фонового задания генерации (не прерывается при переходах)
+    # Проверка активного фонового задания генерации
     active_job_id = st.session_state.get("active_job_id")
     if active_job_id and active_job_id in GLOBAL_JOBS:
         job_info = GLOBAL_JOBS[active_job_id]
         status = job_info.get("status")
 
-        if status in ("retrieving", "generating"):
+        if status in ("started", "retrieving", "generating"):
             with st.chat_message("assistant"):
-                st.info("⏳ **Формирование ответа в фоновом режиме...** Идет выделение тем и отбор 10 статей.")
-                with st.spinner("Конвейер работает в фоне (вы можете переходить в разделы 'Нормативная база' и 'ПДД')..."):
+                st.info("Формирование ответа в фоновом режиме... Вы можете переходить в «Нормативную базу» и «ПДД» — конвейер не прервется.")
+                with st.spinner("Идет поиск первоисточников и генерация ответа..."):
                     time.sleep(2)
                     st.rerun()
 
@@ -407,13 +641,20 @@ if selected_view == "💬 RAG Ассистент (Чат)":
                 "topics": res.get("topics", []),
                 "targets": res.get("targets", []),
                 "fallback_used": res.get("fallback_used", False),
-                "fallback_reason": res.get("fallback_reason")
+                "fallback_reason": res.get("fallback_reason"),
             }
-            active_chat["messages"].append(new_msg)
-            # Обновляем заголовок чата, если он стандартный
+            target_chat_id = job_info.get("chat_id") or active_chat["chat_id"]
+            if job_info.get("saved_in_db"):
+                for ch in user_profile.get("chats", []):
+                    if ch.get("chat_id") == target_chat_id:
+                        ch.setdefault("messages", []).append(new_msg)
+                        break
+            else:
+                ChatManager.append_message(user_profile, target_chat_id, new_msg)
+
             if "Новый диалог" in active_chat.get("title", "") and res.get("topics"):
-                active_chat["title"] = f"{res['topics'][0].capitalize()}"
-            ChatManager.save_user_profile(user_profile)
+                ChatManager.rename_chat(user_profile, active_chat["chat_id"], res["topics"][0].capitalize())
+
             st.session_state.active_job_id = None
             st.rerun()
 
@@ -421,49 +662,103 @@ if selected_view == "💬 RAG Ассистент (Чат)":
             st.error(f"Ошибка фонового конвейера: {job_info.get('error')}")
             st.session_state.active_job_id = None
 
-    # Поле загрузки файла (PDF, DOCX, TXT)
-    with st.expander("📎 Прикрепить документ юриста к вопросу (PDF, DOCX, TXT)", expanded=False):
-        uploaded_file = st.file_uploader(
-            "Выберите файл договора, иска, акта или претензии:",
-            type=["pdf", "docx", "txt", "md"],
-            key="chat_file_attachment"
-        )
-        if uploaded_file:
-            st.caption(f"Файл: `{uploaded_file.name}` ({uploaded_file.size / 1024:.1f} КБ)")
+    # --- НИЖНЯЯ ПАНЕЛЬ КАК В МЕССЕНДЖЕРЕ: ПОЛЕ ВВОДА ПРОМПТА СЛЕВА + ИКОНКА ФАЙЛА СПРАВА ---
+    with st._bottom:
+        pending_file = st.session_state.get("pending_attachment")
+        if pending_file:
+            p_col1, p_col2 = st.columns([10, 2], vertical_alignment="center")
+            p_col1.caption(f"Прикрепленный файл готов к отправке: **{pending_file['name']}** ({pending_file['size_kb']:.1f} КБ)")
+            if p_col2.button("Убрать", key="btn_clear_pending_file", use_container_width=True):
+                st.session_state.pending_attachment = None
+                st.rerun()
 
-    # Ввод вопроса
-    if prompt := st.chat_input("Задайте правовой вопрос по аренде с выкупом, налогам или ПДД..."):
+        col_input, col_attach = st.columns([11, 1], vertical_alignment="center")
+        with col_input:
+            prompt = st.chat_input(
+                "Задайте правовой вопрос по аренде с выкупом, налогам или ПДД...",
+                key="main_chat_input",
+            )
+        with col_attach:
+            with st.popover(" ", help="Прикрепить документ (PDF, DOCX, TXT)", use_container_width=True):
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:6px;'>"
+                    f"{icon_img_html('add_file', size=18, theme=ACTIVE_THEME, margin_right=2)}"
+                    f"<b>Прикрепить документ юриста</b></div>",
+                    unsafe_allow_html=True,
+                )
+                uploaded_file = st.file_uploader(
+                    "Выберите договор, иск, акт или претензию (PDF, DOCX, TXT):",
+                    type=["pdf", "docx", "txt", "md"],
+                    key="chat_file_attachment",
+                )
+                if uploaded_file is not None:
+                    f_bytes = uploaded_file.getvalue()
+                    st.session_state.pending_attachment = {
+                        "name": uploaded_file.name,
+                        "bytes": f_bytes,
+                        "size_kb": len(f_bytes) / 1024.0,
+                    }
+                    st.success(f"Выбран файл: {uploaded_file.name}")
+
+    # Обработка отправки вопроса
+    if prompt:
+        # 1. Пробуждаем процесс Render по WEBHOOK_BASE_URL
+        trigger_render_wakeup()
+
         file_text = ""
         file_name = None
-        if uploaded_file:
-            file_name = uploaded_file.name
-            file_text = extract_text_from_file(uploaded_file.getvalue(), file_name)
+        b2_key = None
+
+        attachment_obj = st.session_state.get("pending_attachment")
+        if attachment_obj:
+            file_name = attachment_obj["name"]
+            f_bytes = attachment_obj["bytes"]
+            file_text = extract_text_from_file(f_bytes, file_name)
+
+            # Загружаем документ в Backblaze B2 Bucket (при наличии конфигурации)
+            if B2StorageManager.is_configured():
+                b2_key = B2StorageManager.upload_user_attachment(
+                    current_user_email,
+                    active_chat["chat_id"],
+                    file_name,
+                    f_bytes,
+                )
+                if b2_key and ChatManager.is_cloud_db_active():
+                    SupabaseChatDB.record_document(
+                        b2_key,
+                        current_user_email,
+                        active_chat["chat_id"],
+                        file_name,
+                        len(f_bytes),
+                    )
+            st.session_state.pending_attachment = None
 
         user_entry = {
             "role": "user",
             "content": prompt,
             "attached_filename": file_name,
-            "attached_chars": len(file_text) if file_text else 0
+            "attached_chars": len(file_text) if file_text else 0,
+            "attached_b2_key": b2_key,
         }
-        active_chat["messages"].append(user_entry)
-        ChatManager.save_user_profile(user_profile)
+        ChatManager.append_message(user_profile, active_chat["chat_id"], user_entry)
 
         # Создаем фоновую задачу
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         GLOBAL_JOBS[job_id] = {
             "status": "started",
-            "user_id": current_user_id,
+            "user_id": current_user_email,
             "chat_id": active_chat.get("chat_id"),
             "result": None,
-            "error": None
+            "error": None,
+            "saved_in_db": False,
         }
         st.session_state.active_job_id = job_id
 
-        # Запуск в фоновом потоке
+        assistant_inst = get_rag_assistant()
         t = threading.Thread(
             target=_run_background_rag_task,
-            args=(job_id, prompt, file_text, current_user_id, active_chat.get("chat_id")),
-            daemon=True
+            args=(job_id, prompt, file_text, current_user_email, active_chat.get("chat_id"), assistant_inst),
+            daemon=True,
         )
         t.start()
         st.rerun()
@@ -473,15 +768,20 @@ if selected_view == "💬 RAG Ассистент (Чат)":
 # VIEW 2: НОРМАТИВНАЯ БАЗА (ГК/НК РФ) С УМНОЙ ВЫБОРКОЙ
 # ==============================================================================
 elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
-    st.header("📜 Нормативно-правовая база (ГК РФ / НК РФ / КоАП РФ / Лизинг)")
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:2px;'>"
+        f"{icon_img_html('regulatory', size=28, theme=ACTIVE_THEME)}"
+        f"<h2 style='margin:0;'>Нормативно-правовая база (ГК РФ / НК РФ / КоАП РФ / Лизинг)</h2>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
     st.caption("Структурированное хранение по статьям: `data/legal/legal_chapters.jsonl`")
 
     legal_items = load_legal_chapters()
 
     if not legal_items:
-        st.info("Нормативные акты будут загружены в `data/legal/legal_chapters.jsonl`.")
+        st.info("Нормативные акты не найдены. Проверьте `data/legal/legal_chapters.jsonl` или синхронизацию Backblaze B2.")
     else:
-        # Фильтры: Кодекс / Закон, Категория, Поиск
         col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
         all_codes = sorted(list(set(d.get("code", d.get("section", "ГК РФ")) for d in legal_items if d.get("code") or d.get("section"))))
         with col_f1:
@@ -508,14 +808,11 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                 or sq in d.get("parent_id", "").lower()
             ]
 
-        # Проверка активного документа (выбранного по кнопке, ссылке или из списка)
         active_id = st.session_state.get("active_legal_doc_id")
         active_doc = None
         if active_id:
             active_doc = next((d for d in legal_items if d.get("parent_id") == active_id or d.get("doc_id") == active_id), None)
 
-        # ТРЕБОВАНИЕ: Если статей больше 1 — выводить только Список всех статей выборки.
-        # Если статья 1 (или выбрана конкретная статья) — показывать полный текст статьи.
         if active_doc:
             col_back, _ = st.columns([1, 4])
             with col_back:
@@ -529,12 +826,12 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                 st.markdown(f'<a id="doc-legal_{active_doc.get("parent_id")}"></a>', unsafe_allow_html=True)
                 col_h1, col_h2 = st.columns([3, 1])
                 with col_h1:
-                    st.subheader(f"📖 {active_doc.get('title')}")
-                    st.caption(f"📁 {active_doc.get('code', 'ГК РФ')} | {active_doc.get('chapter_number', '')} | Тема: **{active_doc.get('category', 'Законодательство')}**")
+                    st.subheader(f"{active_doc.get('title')}")
+                    st.caption(f"{active_doc.get('code', 'ГК РФ')} | {active_doc.get('chapter_number', '')} | Тема: **{active_doc.get('category', 'Законодательство')}**")
                 with col_h2:
                     p_lvl = active_doc.get("priority_level", "standard").upper()
                     st.caption(f"Приоритет: `{p_lvl}`")
-                    st.markdown(f"[🌐 Первоисточник (docs.cntd.ru)]({active_doc.get('original_url', 'https://docs.cntd.ru')})")
+                    st.markdown(f"[Первоисточник (docs.cntd.ru)]({active_doc.get('original_url', 'https://docs.cntd.ru')})")
 
                 st.divider()
                 st.markdown(active_doc.get("body", active_doc.get("full_text", "")))
@@ -547,12 +844,12 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                 st.markdown(f'<a id="doc-legal_{single_doc.get("parent_id")}"></a>', unsafe_allow_html=True)
                 col_h1, col_h2 = st.columns([3, 1])
                 with col_h1:
-                    st.subheader(f"📖 {single_doc.get('title')}")
-                    st.caption(f"📁 {single_doc.get('code', 'ГК РФ')} | {single_doc.get('chapter_number', '')} | Тема: **{single_doc.get('category', 'Законодательство')}**")
+                    st.subheader(f"{single_doc.get('title')}")
+                    st.caption(f"{single_doc.get('code', 'ГК РФ')} | {single_doc.get('chapter_number', '')} | Тема: **{single_doc.get('category', 'Законодательство')}**")
                 with col_h2:
                     p_lvl = single_doc.get("priority_level", "standard").upper()
                     st.caption(f"Приоритет: `{p_lvl}`")
-                    st.markdown(f"[🌐 Первоисточник (docs.cntd.ru)]({single_doc.get('original_url', 'https://docs.cntd.ru')})")
+                    st.markdown(f"[Первоисточник (docs.cntd.ru)]({single_doc.get('original_url', 'https://docs.cntd.ru')})")
 
                 st.divider()
                 st.markdown(single_doc.get("body", single_doc.get("full_text", "")))
@@ -560,9 +857,8 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                     st.caption(f"Реквизиты: {single_doc.get('details')}")
 
         elif len(filtered_docs) > 1:
-            st.info(f"📋 **Список всех статей выборки:** Найдено **{len(filtered_docs)}** статей. Выберите статью для чтения:")
+            st.info(f"**Список всех статей выборки:** Найдено **{len(filtered_docs)}** статей. Выберите статью для чтения:")
 
-            # Таблица / карточки списка выборки
             for idx, doc in enumerate(filtered_docs):
                 p_id = doc.get("parent_id", f"doc_{idx}")
                 with st.container(border=True):
@@ -574,7 +870,7 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
                         st.caption(f"Тема: **{doc.get('category', '')}**")
                         st.caption(f"Кодекс: `{doc.get('code', '')}`")
                     with c3:
-                        if st.button("📖 Читать", key=f"open_art_{p_id}_{idx}", use_container_width=True):
+                        if st.button("Читать", key=f"open_art_{p_id}_{idx}", use_container_width=True):
                             st.session_state.active_legal_doc_id = p_id
                             st.query_params["doc"] = p_id
                             st.rerun()
@@ -587,7 +883,13 @@ elif selected_view == "📜 Нормативная база (ГК/НК РФ)":
 # VIEW 3: ПРАВИЛА ДОРОЖНОГО ДВИЖЕНИЯ (ПДД РФ)
 # ==============================================================================
 elif selected_view == "🚦 Правила дорожного движения (ПДД РФ)":
-    st.header("🚦 Правила дорожного движения РФ (ПДД РФ)")
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:2px;'>"
+        f"{icon_img_html('pdd', size=28, theme=ACTIVE_THEME)}"
+        f"<h2 style='margin:0;'>Правила дорожного движения РФ (ПДД РФ)</h2>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
     st.caption("Структурированное хранение по главам: `data/pdd/pdd_chapters.jsonl`")
 
     pdd_items = load_pdd_chapters()
@@ -616,8 +918,8 @@ elif selected_view == "🚦 Правила дорожного движения (
 
         with st.container(border=True):
             st.markdown(f'<a id="doc-pdd_{cur_ch.get("parent_id")}"></a>', unsafe_allow_html=True)
-            st.subheader(f"🚦 {cur_ch.get('title')}")
-            st.caption(f"📁 {cur_ch.get('chapter_number', '')} | ID: `{cur_ch.get('parent_id')}`")
+            st.subheader(f"{cur_ch.get('title')}")
+            st.caption(f"{cur_ch.get('chapter_number', '')} | ID: `{cur_ch.get('parent_id')}`")
             st.divider()
 
             ch_body = cur_ch.get("body", cur_ch.get("full_text", ""))
@@ -626,14 +928,14 @@ elif selected_view == "🚦 Правила дорожного движения (
                 highlighted_lines = []
                 for line in ch_body.split("\n"):
                     if kw in line.lower():
-                        highlighted_lines.append(f"👉 **{line.strip()}**")
+                        highlighted_lines.append(f"**{line.strip()}**")
                     else:
                         highlighted_lines.append(line)
                 st.markdown("\n".join(highlighted_lines))
             else:
                 st.markdown(ch_body)
 
-        with st.expander(f"📑 Полное оглавление Правил дорожного движения ({len(pdd_items)} разделов)"):
+        with st.expander(f"Полное оглавление Правил дорожного движения ({len(pdd_items)} разделов)"):
             for ch in pdd_items:
                 ch_pid = ch.get("parent_id", "")
                 c1, c2 = st.columns([4, 1])

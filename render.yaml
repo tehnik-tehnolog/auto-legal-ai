@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: rag-auto-raskat
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: sh -c "streamlit run streamlit_app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.11"
+      - key: ENABLE_CHROMA
+        value: "auto"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LLM_MODEL_NAME
+        value: "gemini-3.1-flash-lite-preview"
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: HOST
+        sync: false
+      - key: DB_PORT
+        value: "6543"
+      - key: USER
+        sync: false
+      - key: PASSWORD
+        sync: false
+      - key: B2_ENDPOINT
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: B2_REGION
+        value: "eu-central-003"
+      - key: B2_BUCKET_NAME
+        sync: false

@@ -22,6 +22,8 @@ from rag_pipeline.config import (
     COLLECTION_NEWS,
     COLLECTION_PDD,
     EMBEDDING_MODEL,
+    ENABLE_CHROMA,
+    IS_RENDER,
     LEGAL_JSONL_FILE,
     LOGS_DIR,
     MODEL_NAME,
@@ -152,6 +154,10 @@ class ChromaRAGIndexer:
         self._init_client()
 
     def _init_client(self):
+        if ENABLE_CHROMA == "false" or (ENABLE_CHROMA == "auto" and IS_RENDER):
+            logger.info("Режим Render Free Tier / Low-RAM: используется легкий локальный индекс BM25 + pymorphy3.")
+            self.client = None
+            return
         try:
             import chromadb
             from chromadb.config import Settings
