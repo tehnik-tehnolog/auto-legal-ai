@@ -82,6 +82,7 @@ def icon_img_html(name: str, size: int = 18, theme: Optional[str] = None, margin
     )
 
 
+@lru_cache(maxsize=4)
 def build_ui_icons_css(theme: Optional[str] = None) -> str:
     """
     CSS-стили для встраивания пользовательских SVG-иконок (ui/light и ui/dark)

@@ -198,8 +198,8 @@ class SupabaseChatDB:
                 conn.close()
 
     @classmethod
-    def get_user_profile(cls, email: str) -> Optional[Dict[str, Any]]:
-        """Загрузка профиля пользователя со всеми чатами и историей сообщений из Supabase."""
+    def get_user_profile_meta(cls, email: str) -> Optional[Dict[str, Any]]:
+        """Быстрая загрузка метаданных профиля и списка чатов БЕЗ загрузки сообщений неактивных чатов."""
         if not cls.init_schema():
             return None
 
@@ -229,42 +229,15 @@ class SupabaseChatDB:
                 )
                 chat_rows = cur.fetchall()
 
-                chats: List[Dict[str, Any]] = []
-                for c_id, title, pinned, created_str in chat_rows:
-                    cur.execute(
-                        """
-                        SELECT role, content, sources, topics, targets,
-                               attached_filename, attached_chars, attached_b2_key,
-                               fallback_used, fallback_reason
-                        FROM rag_messages
-                        WHERE chat_id = %s
-                        ORDER BY id ASC
-                        """,
-                        (c_id,),
-                    )
-                    msg_rows = cur.fetchall()
-                    msgs = []
-                    for mr in msg_rows:
-                        msgs.append({
-                            "role": mr[0],
-                            "content": mr[1],
-                            "sources": mr[2] or [],
-                            "topics": mr[3] or [],
-                            "targets": mr[4] or [],
-                            "attached_filename": mr[5],
-                            "attached_chars": mr[6] or 0,
-                            "attached_b2_key": mr[7],
-                            "fallback_used": bool(mr[8]),
-                            "fallback_reason": mr[9],
-                        })
-
-                    chats.append({
+                chats: List[Dict[str, Any]] = [
+                    {
                         "chat_id": c_id,
                         "title": title,
                         "created_at": created_str or "",
                         "pinned": bool(pinned),
-                        "messages": msgs,
-                    })
+                    }
+                    for c_id, title, pinned, created_str in chat_rows
+                ]
 
                 if chats and (not active_chat_id or not any(c["chat_id"] == active_chat_id for c in chats)):
                     active_chat_id = chats[0]["chat_id"]
@@ -277,11 +250,66 @@ class SupabaseChatDB:
                     "chats": chats,
                 }
         except Exception as e:
-            logger.error(f"Ошибка загрузки профиля {norm_email} из Supabase: {e}")
+            logger.error(f"Ошибка загрузки метаданных профиля {norm_email} из Supabase: {e}")
             return None
         finally:
             if conn:
                 conn.close()
+
+    @classmethod
+    def get_chat_messages(cls, chat_id: str) -> List[Dict[str, Any]]:
+        """Загрузка сообщений ТОЛЬКО для одного (активного) чата."""
+        if not chat_id or not cls.init_schema():
+            return []
+
+        conn = None
+        try:
+            conn = cls._connect()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content, sources, topics, targets,
+                           attached_filename, attached_chars, attached_b2_key,
+                           fallback_used, fallback_reason
+                    FROM rag_messages
+                    WHERE chat_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (chat_id,),
+                )
+                msg_rows = cur.fetchall()
+                return [
+                    {
+                        "role": mr[0],
+                        "content": mr[1],
+                        "sources": mr[2] or [],
+                        "topics": mr[3] or [],
+                        "targets": mr[4] or [],
+                        "attached_filename": mr[5],
+                        "attached_chars": mr[6] or 0,
+                        "attached_b2_key": mr[7],
+                        "fallback_used": bool(mr[8]),
+                        "fallback_reason": mr[9],
+                    }
+                    for mr in msg_rows
+                ]
+        except Exception as e:
+            logger.error(f"Ошибка загрузки сообщений чата {chat_id} из Supabase: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    @classmethod
+    def get_user_profile(cls, email: str) -> Optional[Dict[str, Any]]:
+        """Загрузка профиля пользователя и сообщений активного чата."""
+        meta = cls.get_user_profile_meta(email)
+        if not meta:
+            return None
+        active_id = meta.get("active_chat_id")
+        for c in meta.get("chats", []):
+            c["messages"] = cls.get_chat_messages(c["chat_id"]) if c["chat_id"] == active_id else []
+        return meta
 
     @classmethod
     def list_users(cls) -> List[Dict[str, str]]:

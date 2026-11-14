@@ -2,6 +2,7 @@
 Менеджер сессий, профилей пользователей (Email + Имя) и истории чатов для RAG-ассистента.
 При работе на Render / в облаке сохраняет все данные в Supabase PostgreSQL (rag_users, rag_chats, rag_messages).
 При локальной разработке без Supabase автоматически использует локальные JSON-файлы: data/chats/{user_id}.json.
+Оптимизирован: метаданные профиля загружаются отдельно от сообщений, сообщения грузятся только для активного чата.
 """
 
 import json
@@ -28,23 +29,10 @@ def _build_initial_chat() -> Dict[str, Any]:
     initial_chat_id = f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:21]}"
     return {
         "chat_id": initial_chat_id,
-        "title": "Общие вопросы по раскату и законам",
+        "title": "Новый чат",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "pinned": False,
-        "messages": [
-            {
-                "role": "assistant",
-                "content": (
-                    "Здравствуйте! Я юридический RAG-ассистент компании по раскату автомобилей в РФ.\n\n"
-                    "Готов проанализировать правовые вопросы по аренде с выкупом, лизингу, учету расходов, "
-                    "налогам (НК РФ), судебной практике ВС РФ и ПДД. Вы можете прикрепить к вопросу документ "
-                    "(договор, претензию или иск в формате PDF/DOCX/TXT) с помощью кнопки скрепки справа от поля ввода."
-                ),
-                "sources": [],
-                "topics": [],
-                "targets": [],
-            }
-        ],
+        "messages": [],
     }
 
 
@@ -102,25 +90,101 @@ class ChatManager:
             "active_chat_id": chat_obj["chat_id"],
             "chats": [chat_obj],
         }
-        cls.save_user_profile(profile)
+        cls._write_local_profile(profile)
         return profile
 
     @classmethod
-    def load_user_profile(cls, user_id: str, default_name: str = "Юрист") -> Dict[str, Any]:
+    def _write_local_profile(cls, full_profile: Dict[str, Any]):
+        user_id = full_profile.get("user_id", "default_user")
+        user_file = cls.get_user_file(user_id)
+        try:
+            with open(user_file, "w", encoding="utf-8") as f:
+                json.dump(full_profile, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения профиля {user_id}: {e}")
+
+    @classmethod
+    def load_profile_meta(cls, user_id: str, default_name: str = "Юрист") -> Dict[str, Any]:
+        """Быстрая загрузка метаданных профиля (список чатов без сообщений неактивных чатов)."""
         norm_id = user_id.strip().lower()
         if cls.is_cloud_db_active():
-            profile = SupabaseChatDB.get_user_profile(norm_id)
-            if profile:
-                if not profile.get("chats"):
+            meta = SupabaseChatDB.get_user_profile_meta(norm_id)
+            if meta:
+                if not meta.get("chats"):
                     new_chat = _build_initial_chat()
                     SupabaseChatDB.create_chat(norm_id, new_chat)
-                    profile["chats"] = [new_chat]
-                    profile["active_chat_id"] = new_chat["chat_id"]
-                return profile
-            # Если пользователя еще нет в Supabase — регистрируем
-            return cls.register_or_login(norm_id, default_name)
+                    meta["chats"] = [
+                        {
+                            "chat_id": new_chat["chat_id"],
+                            "title": new_chat["title"],
+                            "created_at": new_chat["created_at"],
+                            "pinned": False,
+                        }
+                    ]
+                    meta["active_chat_id"] = new_chat["chat_id"]
+                return meta
+            full = cls.register_or_login(norm_id, default_name)
+            return {
+                "user_id": full["user_id"],
+                "email": full.get("email", norm_id),
+                "user_name": full.get("user_name", default_name),
+                "active_chat_id": full.get("active_chat_id"),
+                "chats": [
+                    {
+                        "chat_id": c["chat_id"],
+                        "title": c.get("title", "Чат"),
+                        "created_at": c.get("created_at", ""),
+                        "pinned": bool(c.get("pinned", False)),
+                    }
+                    for c in full.get("chats", [])
+                ],
+            }
 
-        return cls._load_or_create_local_profile(norm_id, default_name)
+        full_local = cls._load_or_create_local_profile(norm_id, default_name)
+        return {
+            "user_id": full_local["user_id"],
+            "email": full_local.get("email", norm_id),
+            "user_name": full_local.get("user_name", default_name),
+            "active_chat_id": full_local.get("active_chat_id"),
+            "chats": [
+                {
+                    "chat_id": c["chat_id"],
+                    "title": c.get("title", "Чат"),
+                    "created_at": c.get("created_at", ""),
+                    "pinned": bool(c.get("pinned", False)),
+                }
+                for c in full_local.get("chats", [])
+            ],
+        }
+
+    @classmethod
+    def load_chat_messages(cls, user_id: str, chat_id: str) -> List[Dict[str, Any]]:
+        """Загрузка сообщений ТОЛЬКО для указанного активного чата."""
+        if not chat_id:
+            return []
+        if cls.is_cloud_db_active():
+            return SupabaseChatDB.get_chat_messages(chat_id)
+
+        full_local = cls._load_or_create_local_profile(user_id.strip().lower())
+        for c in full_local.get("chats", []):
+            if c.get("chat_id") == chat_id:
+                return c.get("messages", [])
+        return []
+
+    @classmethod
+    def load_user_profile(cls, user_id: str, default_name: str = "Юрист") -> Dict[str, Any]:
+        """Обратная совместимость: метаданные + сообщения активного чата."""
+        meta = cls.load_profile_meta(user_id, default_name)
+        active_id = meta.get("active_chat_id")
+        if not active_id and meta.get("chats"):
+            active_id = meta["chats"][0]["chat_id"]
+            meta["active_chat_id"] = active_id
+        for c in meta.get("chats", []):
+            if c["chat_id"] == active_id:
+                c["messages"] = cls.load_chat_messages(user_id, active_id)
+            else:
+                c["messages"] = []
+        return meta
 
     @classmethod
     def list_known_users(cls) -> List[Dict[str, str]]:
@@ -144,37 +208,29 @@ class ChatManager:
         return users or DEFAULT_USERS
 
     @classmethod
-    def save_user_profile(cls, profile: Dict[str, Any]):
-        """Локальное резервное сохранение (в облаке мутации сохраняются точечно в Supabase)"""
-        if cls.is_cloud_db_active():
-            return
-        user_id = profile.get("user_id", "default_user")
-        user_file = cls.get_user_file(user_id)
-        try:
-            with open(user_file, "w", encoding="utf-8") as f:
-                json.dump(profile, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Ошибка сохранения профиля {user_id}: {e}")
-
-    @classmethod
     def set_active_chat(cls, profile: Dict[str, Any], chat_id: str):
         profile["active_chat_id"] = chat_id
+        email = profile.get("email") or profile.get("user_id", "")
         if cls.is_cloud_db_active():
-            SupabaseChatDB.set_active_chat(profile.get("email") or profile.get("user_id", ""), chat_id)
+            SupabaseChatDB.set_active_chat(email, chat_id)
         else:
-            cls.save_user_profile(profile)
+            full_local = cls._load_or_create_local_profile(email)
+            full_local["active_chat_id"] = chat_id
+            cls._write_local_profile(full_local)
 
     @classmethod
     def append_message(cls, profile: Dict[str, Any], chat_id: str, msg: Dict[str, Any]):
-        """Добавляет сообщение в чат и сохраняет в Supabase (или локальный JSON)"""
-        for chat in profile.get("chats", []):
-            if chat.get("chat_id") == chat_id:
-                chat.setdefault("messages", []).append(msg)
-                break
+        """Добавляет сообщение в чат и сохраняет в Supabase (или локальный JSON)."""
+        email = profile.get("email") or profile.get("user_id", "")
         if cls.is_cloud_db_active():
             SupabaseChatDB.append_message(chat_id, msg)
         else:
-            cls.save_user_profile(profile)
+            full_local = cls._load_or_create_local_profile(email)
+            for chat in full_local.get("chats", []):
+                if chat.get("chat_id") == chat_id:
+                    chat.setdefault("messages", []).append(msg)
+                    break
+            cls._write_local_profile(full_local)
 
     @classmethod
     def create_new_chat(cls, profile: Dict[str, Any], title: Optional[str] = None) -> str:
@@ -185,52 +241,60 @@ class ChatManager:
             "title": new_title,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "pinned": False,
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "Создан новый чат. Введите вопрос или прикрепите документ для правового анализа.",
-                    "sources": [],
-                    "topics": [],
-                    "targets": [],
-                }
-            ],
+            "messages": [],
         }
+        email = profile.get("email") or profile.get("user_id", "")
         profile.setdefault("chats", []).insert(0, new_chat)
         profile["active_chat_id"] = new_id
         if cls.is_cloud_db_active():
-            SupabaseChatDB.create_chat(profile.get("email") or profile.get("user_id", ""), new_chat)
+            SupabaseChatDB.create_chat(email, new_chat)
         else:
-            cls.save_user_profile(profile)
+            full_local = cls._load_or_create_local_profile(email)
+            full_local.setdefault("chats", []).insert(0, new_chat)
+            full_local["active_chat_id"] = new_id
+            cls._write_local_profile(full_local)
         return new_id
 
     @classmethod
     def toggle_pin(cls, profile: Dict[str, Any], chat_id: str) -> bool:
+        email = profile.get("email") or profile.get("user_id", "")
+        new_state = False
         for chat in profile.get("chats", []):
             if chat.get("chat_id") == chat_id:
                 new_state = not chat.get("pinned", False)
                 chat["pinned"] = new_state
-                if cls.is_cloud_db_active():
-                    SupabaseChatDB.toggle_pin(chat_id, new_state)
-                else:
-                    cls.save_user_profile(profile)
-                return new_state
-        return False
+                break
+        if cls.is_cloud_db_active():
+            SupabaseChatDB.toggle_pin(chat_id, new_state)
+        else:
+            full_local = cls._load_or_create_local_profile(email)
+            for chat in full_local.get("chats", []):
+                if chat.get("chat_id") == chat_id:
+                    chat["pinned"] = new_state
+                    break
+            cls._write_local_profile(full_local)
+        return new_state
 
     @classmethod
     def delete_chat(cls, profile: Dict[str, Any], chat_id: str) -> bool:
         chats = profile.get("chats", [])
         if len(chats) <= 1:
-            return False  # Не удаляем последний чат
+            return False
+        email = profile.get("email") or profile.get("user_id", "")
         profile["chats"] = [c for c in chats if c.get("chat_id") != chat_id]
         if profile.get("active_chat_id") == chat_id:
             new_active = profile["chats"][0]["chat_id"]
             profile["active_chat_id"] = new_active
             if cls.is_cloud_db_active():
-                SupabaseChatDB.set_active_chat(profile.get("email") or profile.get("user_id", ""), new_active)
+                SupabaseChatDB.set_active_chat(email, new_active)
         if cls.is_cloud_db_active():
             SupabaseChatDB.delete_chat(chat_id)
         else:
-            cls.save_user_profile(profile)
+            full_local = cls._load_or_create_local_profile(email)
+            full_local["chats"] = [c for c in full_local.get("chats", []) if c.get("chat_id") != chat_id]
+            if full_local.get("active_chat_id") == chat_id and full_local["chats"]:
+                full_local["active_chat_id"] = full_local["chats"][0]["chat_id"]
+            cls._write_local_profile(full_local)
         return True
 
     @classmethod
@@ -238,14 +302,20 @@ class ChatManager:
         clean_title = new_title.strip()
         if not clean_title:
             return
+        email = profile.get("email") or profile.get("user_id", "")
         for chat in profile.get("chats", []):
             if chat.get("chat_id") == chat_id:
                 chat["title"] = clean_title
-                if cls.is_cloud_db_active():
-                    SupabaseChatDB.rename_chat(chat_id, clean_title)
-                else:
-                    cls.save_user_profile(profile)
                 break
+        if cls.is_cloud_db_active():
+            SupabaseChatDB.rename_chat(chat_id, clean_title)
+        else:
+            full_local = cls._load_or_create_local_profile(email)
+            for chat in full_local.get("chats", []):
+                if chat.get("chat_id") == chat_id:
+                    chat["title"] = clean_title
+                    break
+            cls._write_local_profile(full_local)
 
     @classmethod
     def get_active_chat(cls, profile: Dict[str, Any]) -> Dict[str, Any]:
