@@ -1,6 +1,6 @@
 {
-  "name": "RAG Auto Raskat Collector",
-  "description": "Серверные скрипты сбора данных и расписание обновления для RAG-ассистента раската машин в РФ.",
+  "name": "Юридический RAG-ассистент",
+  "description": "Правовой ИИ-ассистент и справочник нормативной базы (ГК РФ, НК РФ, КоАП, ВС РФ, ПДД) для компаний по аренде и выкупу авто.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
