@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Moon, Sun, ArrowRight } from 'lucide-react';
+import { ArrowRight, Moon, Sun, User as UserIcon } from 'lucide-react';
 import type { ChatMessage, ThemeMode, UserProfileMeta } from '../types/rag';
 import { apiFetch, setStoredDeviceToken } from '../utils/api';
 import { UiIcon } from './UiIcon';
@@ -19,6 +19,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const [email, setEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [guestSubmitting, setGuestSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,6 +54,29 @@ export const AuthGate: React.FC<AuthGateProps> = ({
       setError(err instanceof Error ? err.message : 'Ошибка входа. Попробуйте ещё раз.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleGuestLogin = async () => {
+    setError(null);
+    setGuestSubmitting(true);
+    try {
+      const res = await apiFetch<{
+        authenticated: boolean;
+        profile: UserProfileMeta;
+        messages: ChatMessage[];
+        deviceToken: string;
+      }>('/api/auth/guest', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+
+      setStoredDeviceToken(res.deviceToken);
+      onAuthenticated(res.profile, res.messages || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка гостевого входа. Попробуйте ещё раз.');
+    } finally {
+      setGuestSubmitting(false);
     }
   };
 
@@ -138,13 +162,29 @@ export const AuthGate: React.FC<AuthGateProps> = ({
 
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || guestSubmitting}
               className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg bg-[#1E3A8A] hover:bg-[#1E40AF] dark:bg-[#2563EB] dark:hover:bg-[#3B82F6] text-white disabled:opacity-60 transition-colors cursor-pointer whitespace-nowrap"
             >
               <span>{submitting ? 'Вход в рабочее пространство...' : 'Войти и запомнить устройство'}</span>
               {!submitting && <ArrowRight className="w-4 h-4" />}
             </button>
           </form>
+
+          <div className="relative my-5 flex items-center">
+            <div className="flex-1 border-t border-[#E2E8F0] dark:border-[#1E293B]" />
+            <span className="px-3 text-xs text-slate-400 dark:text-slate-500">или</span>
+            <div className="flex-1 border-t border-[#E2E8F0] dark:border-[#1E293B]" />
+          </div>
+
+          <button
+            type="button"
+            disabled={submitting || guestSubmitting}
+            onClick={() => void handleGuestLogin()}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/80 disabled:opacity-60 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <UserIcon className="w-4 h-4" />
+            <span>{guestSubmitting ? 'Создание гостевой сессии...' : 'Войти как гость'}</span>
+          </button>
         </div>
       </main>
     </div>

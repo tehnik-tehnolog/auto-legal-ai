@@ -5,6 +5,7 @@ import express, { type Request, type Response } from 'express';
 import multer from 'multer';
 import { b2Storage } from './server/b2Storage';
 import {
+  CHROMA_DIR,
   DATA_DIR,
   LEGAL_CHAPTERS_FILE,
   PDD_CHAPTERS_FILE,
@@ -82,6 +83,24 @@ async function hydrateAttachmentUrls(messages: ChatMessage[]): Promise<ChatMessa
   );
 }
 
+function normalizeUploadedFilename(rawName?: string, utf8Override?: unknown): string {
+  const override = typeof utf8Override === 'string' ? utf8Override.trim() : '';
+  if (override) return override;
+  if (!rawName) return 'document';
+  // Fix busboy/multer latin1 mojibake for UTF-8 Cyrillic filenames
+  if (!/[а-яА-ЯёЁ]/.test(rawName)) {
+    try {
+      const decoded = Buffer.from(rawName, 'latin1').toString('utf8');
+      if (!decoded.includes('\uFFFD') && /[а-яА-ЯёЁ]/.test(decoded)) {
+        return decoded;
+      }
+    } catch {
+      // keep rawName
+    }
+  }
+  return rawName;
+}
+
 async function startServer(): Promise<void> {
   const app = express();
   const upload = multer({
@@ -149,6 +168,23 @@ async function startServer(): Promise<void> {
     }
   });
 
+  // Guest sign-in without email/name registration
+  app.post('/api/auth/guest', async (_req: Request, res: Response) => {
+    try {
+      const guestEmail = `guest_${crypto.randomBytes(6).toString('hex')}@guest.local`;
+      const data = await dbService.registerOrLogin(guestEmail, 'Гость');
+      res.json({
+        authenticated: true,
+        profile: data.profile,
+        messages: data.messages || [],
+        deviceToken: data.deviceToken,
+      });
+    } catch (err) {
+      console.error('[API] /api/auth/guest error:', err);
+      res.status(500).json({ error: 'Не удалось войти как гость.' });
+    }
+  });
+
   // Logout & forget device token
   app.post('/api/auth/logout', async (req: Request, res: Response) => {
     try {
@@ -179,7 +215,14 @@ async function startServer(): Promise<void> {
 
     if (docId) {
       const cleanId = docId.replace(/^(?:#?doc-legal_|#?legal_|#)/, '');
-      const found = allDocs.find((d) => d.parent_id === cleanId || d.doc_id === cleanId) || null;
+      const found =
+        allDocs.find(
+          (d) =>
+            d.parent_id === docId ||
+            d.doc_id === docId ||
+            d.parent_id === cleanId ||
+            d.doc_id === cleanId
+        ) || null;
       res.json({
         doc: found,
         codes,
@@ -257,8 +300,14 @@ async function startServer(): Promise<void> {
 
     let activeChapter = allChapters[0] || null;
     if (pddId) {
-      const cleanId = pddId.replace(/^(?:#?doc-pdd_|#?pdd_|#)/, '');
-      const match = allChapters.find((c) => c.parent_id === cleanId || c.doc_id === cleanId);
+      const cleanId = pddId.replace(/^(?:#?doc-pdd_|#)/, '');
+      const match = allChapters.find(
+        (c) =>
+          c.parent_id === pddId ||
+          c.doc_id === pddId ||
+          c.parent_id === cleanId ||
+          c.doc_id === cleanId
+      );
       if (match) activeChapter = match;
     }
 
@@ -360,14 +409,17 @@ async function startServer(): Promise<void> {
       let attachedDownloadUrl: string | null = null;
 
       if (req.file) {
-        attachedFilename = req.file.originalname;
-        extractedText = await extractTextFromFile(req.file.buffer, req.file.originalname);
+        attachedFilename = normalizeUploadedFilename(
+          req.file.originalname,
+          req.body?.originalFilename
+        );
+        extractedText = await extractTextFromFile(req.file.buffer, attachedFilename);
 
         if (b2Storage.isConfigured()) {
           attachedB2Key = await b2Storage.uploadUserAttachment(
             email,
             chatId,
-            req.file.originalname,
+            attachedFilename,
             req.file.buffer,
             req.file.mimetype
           );
@@ -376,7 +428,7 @@ async function startServer(): Promise<void> {
               attachedB2Key,
               email,
               chatId,
-              req.file.originalname,
+              attachedFilename,
               req.file.size
             );
             attachedDownloadUrl = await b2Storage.getPresignedUrl(attachedB2Key);
@@ -494,13 +546,16 @@ async function startServer(): Promise<void> {
 
   app.listen(SERVER_PORT, '0.0.0.0', () => {
     console.log(`[Server] Legal RAG Express + React listening on http://0.0.0.0:${SERVER_PORT}`);
-    // Hydrate KB from B2 if needed and warm up BM25 indices in background
+    // Hydrate KB from B2 if any core KB file is missing and warm up BM25 indices in background
     void (async () => {
-      if (
-        b2Storage.isConfigured() &&
-        (!fs.existsSync(LEGAL_CHAPTERS_FILE) || !fs.existsSync(PDD_CHAPTERS_FILE))
-      ) {
-        console.log('[B2] Cold start: syncing KB from Backblaze B2...');
+      const needsB2Sync =
+        !fs.existsSync(LEGAL_CHAPTERS_FILE) ||
+        !fs.existsSync(PDD_CHAPTERS_FILE) ||
+        !fs.existsSync(path.join(CHROMA_DIR, 'legal_laws_chunks.json')) ||
+        !fs.existsSync(path.join(CHROMA_DIR, 'parent_store.json'));
+
+      if (b2Storage.isConfigured() && (needsB2Sync || process.env.B2_AUTO_SYNC === 'true')) {
+        console.log('[B2] Syncing KB from Backblaze B2...');
         await b2Storage.syncKbFromB2(DATA_DIR);
         ragEngine.reload();
       } else {

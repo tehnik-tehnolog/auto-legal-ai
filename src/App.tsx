@@ -53,7 +53,7 @@ export default function App() {
       setActiveLegalDocId(docParam.replace(/^(?:#?doc-legal_|#?legal_|#)/, ''));
       setActiveNav('legal');
     } else if (pddParam) {
-      setActivePddId(pddParam.replace(/^(?:#?doc-pdd_|#?pdd_|#)/, ''));
+      setActivePddId(pddParam.replace(/^(?:#?doc-pdd_|#)/, ''));
       setActiveNav('pdd');
     }
   }, []);
@@ -253,6 +253,7 @@ export default function App() {
     form.append('chatId', chatId);
     if (file) {
       form.append('file', file);
+      form.append('originalFilename', file.name);
     }
 
     const res = await apiFetch<{ jobId: string; userMessage: ChatMessage }>('/api/chat/ask', {

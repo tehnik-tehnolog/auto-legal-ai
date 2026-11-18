@@ -170,10 +170,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="min-w-0">
               <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                {profile.user_name || 'Юрист'}
+                {profile.email.endsWith('@guest.local') ? 'Гость' : profile.user_name || 'Юрист'}
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                {profile.email}
+                {profile.email.endsWith('@guest.local') ? 'Гостевой доступ' : profile.email}
               </div>
             </div>
           </div>
@@ -191,8 +191,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={onLogout}
-              title="Выйти из профиля"
-              aria-label="Выйти из профиля"
+              title={profile.email.endsWith('@guest.local') ? 'Войти по почте' : 'Выйти из профиля'}
+              aria-label={profile.email.endsWith('@guest.local') ? 'Войти по почте' : 'Выйти из профиля'}
               className="p-1.5 rounded-lg border border-transparent hover:border-[#E2E8F0] dark:hover:border-[#1E293B] hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
             >
               <LogOut className="w-4 h-4" />

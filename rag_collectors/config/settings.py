@@ -8,7 +8,11 @@ except ImportError:
 
 # Базовые директории
 BASE_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = BASE_DIR.parent if (BASE_DIR.parent / "streamlit_app.py").exists() else BASE_DIR
+PROJECT_ROOT = (
+    BASE_DIR.parent
+    if (BASE_DIR.parent / "server.ts").exists() or (BASE_DIR.parent / "package.json").exists()
+    else BASE_DIR
+)
 DATA_DIR = Path(os.getenv("RAG_DATA_DIR", PROJECT_ROOT / "data"))
 
 # Поддиректории для каждого источника данных

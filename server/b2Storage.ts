@@ -17,6 +17,33 @@ import {
   DATA_DIR,
 } from './config';
 
+const KB_SUBDIRS = ['legal', 'pdd', 'court', 'news', 'cars', 'chroma'];
+
+function collectFilesRecursively(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const results: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'cache' || entry.name.startsWith('.')) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectFilesRecursively(fullPath));
+    } else if (entry.isFile()) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+function guessContentType(filePath: string): string {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.json') || lower.endsWith('.jsonl')) return 'application/json; charset=utf-8';
+  if (lower.endsWith('.md')) return 'text/markdown; charset=utf-8';
+  if (lower.endsWith('.txt')) return 'text/plain; charset=utf-8';
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.sqlite3') || lower.endsWith('.bin')) return 'application/octet-stream';
+  return 'application/octet-stream';
+}
+
 class B2StorageService {
   private client: S3Client | null = null;
   private resolvedBucket: string | null = null;
@@ -108,7 +135,9 @@ class B2StorageService {
     }
   }
 
-  async syncKbFromB2(targetDir = DATA_DIR): Promise<{ configured: boolean; downloaded: number; skipped: number }> {
+  async syncKbFromB2(
+    targetDir = DATA_DIR
+  ): Promise<{ configured: boolean; downloaded: number; skipped: number }> {
     const summary = { configured: this.isConfigured(), downloaded: 0, skipped: 0 };
     if (!this.isConfigured()) return summary;
 
@@ -155,6 +184,72 @@ class B2StorageService {
     } catch (err) {
       console.warn('[B2] KB sync warning:', err);
     }
+    return summary;
+  }
+
+  async uploadKbToB2(
+    sourceDir = DATA_DIR
+  ): Promise<{ configured: boolean; uploaded: number; skipped: number; errors: number }> {
+    const summary = { configured: this.isConfigured(), uploaded: 0, skipped: 0, errors: 0 };
+    if (!this.isConfigured()) return summary;
+
+    const client = this.getClient();
+    const bucket = await this.getBucketName();
+    if (!client || !bucket) return summary;
+
+    // Fetch existing sizes in kb/ to avoid redundant uploads
+    const remoteSizes = new Map<string, number>();
+    try {
+      let continuationToken: string | undefined;
+      do {
+        const listResp = await client.send(
+          new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: 'kb/',
+            ContinuationToken: continuationToken,
+          })
+        );
+        for (const obj of listResp.Contents || []) {
+          if (obj.Key && typeof obj.Size === 'number') {
+            remoteSizes.set(obj.Key, obj.Size);
+          }
+        }
+        continuationToken = listResp.NextContinuationToken;
+      } while (continuationToken);
+    } catch (err) {
+      console.warn('[B2] Unable to inspect remote kb/ objects:', err);
+    }
+
+    for (const sub of KB_SUBDIRS) {
+      const subDir = path.join(sourceDir, sub);
+      const files = collectFilesRecursively(subDir);
+      for (const filePath of files) {
+        const rel = path.relative(sourceDir, filePath).split(path.sep).join('/');
+        const b2Key = `kb/${rel}`;
+        const stat = fs.statSync(filePath);
+        if (remoteSizes.get(b2Key) === stat.size) {
+          summary.skipped += 1;
+          continue;
+        }
+        try {
+          const data = fs.readFileSync(filePath);
+          await client.send(
+            new PutObjectCommand({
+              Bucket: bucket,
+              Key: b2Key,
+              Body: data,
+              ContentType: guessContentType(filePath),
+            })
+          );
+          summary.uploaded += 1;
+          console.log(`[B2] Uploaded ${b2Key} (${stat.size} bytes)`);
+        } catch (err) {
+          console.error(`[B2] Failed to upload ${b2Key}:`, err);
+          summary.errors += 1;
+        }
+      }
+    }
+
     return summary;
   }
 }

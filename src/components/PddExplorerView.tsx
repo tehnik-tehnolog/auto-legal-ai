@@ -98,7 +98,7 @@ export const PddExplorerView: React.FC<PddExplorerViewProps> = ({
                 Глава или раздел ПДД РФ
               </label>
               <select
-                value={chapter?.parent_id || activePddId || ''}
+                value={activePddId || chapter?.parent_id || ''}
                 onChange={(e) => onSelectPdd(e.target.value)}
                 className="w-full px-3 py-2 text-xs rounded-lg border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-blue-600"
               >
@@ -127,10 +127,14 @@ export const PddExplorerView: React.FC<PddExplorerViewProps> = ({
             </div>
           </div>
 
-          {loading ? (
+          {loading && !chapter ? (
             <div className="h-64 rounded-xl border border-[#E2E8F0] dark:border-[#1E293B] bg-white dark:bg-[#111827] animate-pulse" />
           ) : chapter ? (
-            <article className="bg-white dark:bg-[#111827] border border-[#E2E8F0] dark:border-[#1E293B] rounded-xl p-6 lg:p-8 space-y-5">
+            <article
+              className={`bg-white dark:bg-[#111827] border border-[#E2E8F0] dark:border-[#1E293B] rounded-xl p-6 lg:p-8 space-y-5 transition-opacity ${
+                loading ? 'opacity-60' : 'opacity-100'
+              }`}
+            >
               <header className="space-y-1.5 pb-4 border-b border-[#E2E8F0] dark:border-[#1E293B]">
                 <div className="text-xs text-slate-500 dark:text-slate-400 font-mono">
                   {chapter.chapter_number} · {chapter.parent_id}
@@ -157,23 +161,36 @@ export const PddExplorerView: React.FC<PddExplorerViewProps> = ({
                 Полное оглавление Правил дорожного движения ({toc.length})
               </summary>
               <div className="divide-y divide-[#E2E8F0] dark:divide-[#1E293B] border-t border-[#E2E8F0] dark:border-[#1E293B]">
-                {toc.map((ch) => (
-                  <div
-                    key={ch.parent_id}
-                    className="px-5 py-2.5 flex items-center justify-between gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/50"
-                  >
-                    <span className="text-xs font-medium text-slate-800 dark:text-slate-200">
-                      {formatPddLabel(ch)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onSelectPdd(ch.parent_id)}
-                      className="text-xs font-semibold text-[#1E3A8A] hover:text-[#1E40AF] dark:text-blue-400 dark:hover:text-blue-300 cursor-pointer whitespace-nowrap"
+                {toc.map((ch) => {
+                  const isCurrent = ch.parent_id === (activePddId || chapter?.parent_id);
+                  return (
+                    <div
+                      key={ch.parent_id}
+                      className={`px-5 py-2.5 flex items-center justify-between gap-4 ${
+                        isCurrent
+                          ? 'bg-slate-100 dark:bg-slate-800/80'
+                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                      }`}
                     >
-                      Перейти
-                    </button>
-                  </div>
-                ))}
+                      <span
+                        className={`text-xs ${
+                          isCurrent
+                            ? 'font-semibold text-[#1E3A8A] dark:text-blue-400'
+                            : 'font-medium text-slate-800 dark:text-slate-200'
+                        }`}
+                      >
+                        {formatPddLabel(ch)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onSelectPdd(ch.parent_id)}
+                        className="text-xs font-semibold text-[#1E3A8A] hover:text-[#1E40AF] dark:text-blue-400 dark:hover:text-blue-300 cursor-pointer whitespace-nowrap"
+                      >
+                        {isCurrent ? 'Открыто' : 'Перейти'}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </details>
           )}
