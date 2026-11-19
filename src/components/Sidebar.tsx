@@ -155,7 +155,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const navItems: Array<{ id: NavSection; label: string; icon: 'court' | 'regulatory' | 'pdd' }> = [
     { id: 'chat', label: 'Ассистент (Чат)', icon: 'court' },
-    { id: 'legal', label: 'Нормативная база', icon: 'regulatory' },
+    { id: 'legal', label: 'Нормативно-правовая база', icon: 'regulatory' },
     { id: 'pdd', label: 'Правила дорожного движения', icon: 'pdd' },
   ];
 

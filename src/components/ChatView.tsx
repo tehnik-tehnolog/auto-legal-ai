@@ -29,11 +29,11 @@ interface ChatViewProps {
 }
 
 const NEW_GREETING =
-  'Здравствуйте. Я юридический ассистент. Готов проанализировать правовые вопросы по аренде с выкупом, лизингу, учёту расходов, налогам (НК РФ), судебной практике ВС РФ и ПДД. Вы можете прикрепить к вопросу документ (PDF, DOCX или TXT).';
+  'Здравствуйте. Я юридический ассистент. Готов проанализировать правовые вопросы по лизингу, учёту расходов, налогам, судебной практике ВС РФ и ПДД. Вы можете прикрепить к вопросу документ (PDF, DOCX или TXT).';
 
 const STARTER_QUESTIONS = [
   'Каков порядок расторжения договора аренды транспортного средства с правом выкупа при просрочке платежей по ГК РФ?',
-  'Как учитывать лизинговые платежи и транспортный налог при передаче авто в раскат по НК РФ?',
+  'Как учитывать в расходах по налогу на прибыль затраты на капремонт и замену агрегатов машин на балансе, переданных в лизинг?',
   'Какие документы водитель обязан иметь при себе и предъявлять по ПДД РФ?',
 ];
 
@@ -232,10 +232,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <div className="w-full bg-white dark:bg-[#111827] border border-[#E2E8F0] dark:border-[#1E293B] rounded-xl px-5 py-4 space-y-3">
                     {msg.topics && msg.topics.length > 0 && (
                       <div className="text-xs text-slate-500 dark:text-slate-400">
-                        <span>Темы поиска: </span>
-                        <span className="text-slate-700 dark:text-slate-300 font-medium">
-                          {msg.topics.join(' · ')}
-                        </span>
                       </div>
                     )}
 
@@ -268,11 +264,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                     {srcCount > 0 && (
                       <div className="pt-2.5 border-t border-[#E2E8F0] dark:border-[#1E293B] flex items-center justify-between gap-4 text-xs">
-                        <span className="text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                          {msg.fallback_used || srcCount <= 5
-                            ? `Первоисточники: ${srcCount} базовых`
-                            : `Первоисточники: ${srcCount} (5 базовых + ${srcCount - 5} тематических)`}
-                        </span>
                         <button
                           type="button"
                           onClick={() => onInspectMessage(idx)}
@@ -302,7 +293,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <span>{JOB_STATUS_LABELS[activeJob.status] || 'Обработка запроса...'}</span>
                 </div>
                 <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                  Вы можете переключаться в «Нормативную базу» и «ПДД» — конвейер продолжит работу в фоне.
+                  Вы можете переключаться в «Нормативно-правовую базу» и «ПДД» — конвейер продолжит работу в фоне.
                 </p>
               </div>
             )}
@@ -373,7 +364,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   void handleSubmit();
                 }
               }}
-              placeholder="Задайте правовой вопрос по аренде с выкупом, налогам или ПДД..."
+              placeholder="Задайте свой правовой вопрос..."
               className="flex-1 min-w-0 resize-none px-3.5 py-2.5 text-sm rounded-xl border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/25 focus:border-blue-600 dark:focus:border-blue-500 max-h-40 overflow-y-auto"
             />
 

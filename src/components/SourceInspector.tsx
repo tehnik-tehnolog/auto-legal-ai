@@ -12,7 +12,7 @@ interface SourceInspectorProps {
 }
 
 const COLLECTION_LABELS: Record<string, string> = {
-  legal_laws: 'Нормативная база',
+  legal_laws: 'Нормативно-правовая база',
   court_cases: 'Судебная практика ВС РФ',
   traffic_rules: 'ПДД РФ',
   auto_news: 'Новости авторынка',
@@ -84,7 +84,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
               Источники не выбраны
             </p>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed max-w-xs mx-auto">
-              Задайте вопрос ассистенту или выберите «Источники» под любым ответом в ленте, чтобы увидеть статьи ГК, НК, ПДД и их Rerank Score.
+              Задайте вопрос ассистенту или выберите «Источники» под любым ответом в ленте, чтобы увидеть статьи ГК, НК, ПДД.
             </p>
           </div>
         ) : (
@@ -119,7 +119,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
               {topics.length > 0 && (
                 <div>
                   <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">
-                    Выделенные темы запроса (Gemini)
+                    Выделенные темы запроса
                   </div>
                   <div className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed">
                     {topics.map((t, i) => (

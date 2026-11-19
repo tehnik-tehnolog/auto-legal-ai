@@ -238,7 +238,7 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
                     onSelectDoc(null);
                     setSearchQuery(e.target.value);
                   }}
-                  placeholder="Например: 615, лизинг, выкуп, налог..."
+                  placeholder="Например: 33, лизинг, выкуп, налог..."
                   className="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-blue-600"
                 />
               </div>

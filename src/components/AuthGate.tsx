@@ -138,7 +138,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 htmlFor="auth-email"
                 className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5"
               >
-                Корпоративная почта
+                Ваш Email
               </label>
               <input
                 id="auth-email"
@@ -165,7 +165,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               disabled={submitting || guestSubmitting}
               className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg bg-[#1E3A8A] hover:bg-[#1E40AF] dark:bg-[#2563EB] dark:hover:bg-[#3B82F6] text-white disabled:opacity-60 transition-colors cursor-pointer whitespace-nowrap"
             >
-              <span>{submitting ? 'Вход в рабочее пространство...' : 'Войти и запомнить устройство'}</span>
+              <span>{submitting ? 'Вход в рабочее пространство...' : 'Войти или Зарегистрироваться'}</span>
               {!submitting && <ArrowRight className="w-4 h-4" />}
             </button>
           </form>
