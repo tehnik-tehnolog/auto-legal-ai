@@ -5,6 +5,7 @@ Metadata Boost и отсечением бюрократического шума
 
 import json
 import logging
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,8 +17,10 @@ from rag_pipeline.config import (
     COLLECTION_LAWS,
     COLLECTION_NEWS,
     COLLECTION_PDD,
+    CROSS_ENCODER_TOP_N,
     PRIORITY_HIGH_BOOST,
     PRIORITY_MEDIUM_BOOST,
+    RERANKER_MODEL,
     TOP_K_RERANK,
     TOP_K_RETRIEVAL,
 )
@@ -138,11 +141,35 @@ class HybridRetriever:
         self.indexer = ChromaRAGIndexer()
         self.parent_store = self.indexer.load_parent_store()
         self.bm25_indices: Dict[str, SimpleBM25Index] = {}
+        self._cross_encoder = None
+        self._cross_encoder_failed = False
         self._init_bm25()
 
     def _init_bm25(self):
-        """Загрузка чанков и инициализация BM25 для каждой коллекции"""
+        """Загрузка сохраненных BM25-индексов из bm25_indices.json с фоллбэком на {coll}_chunks.json."""
+        bm25_store_data: Dict[str, Any] = {}
+        if self.indexer.bm25_store_path.exists():
+            try:
+                with open(self.indexer.bm25_store_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        bm25_store_data = loaded
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить {self.indexer.bm25_store_path}: {e}")
+
         for coll_name in ALL_COLLECTIONS:
+            # 1. Приоритет: загрузка готового индекса из bm25_indices.json
+            coll_dump = bm25_store_data.get(coll_name)
+            if isinstance(coll_dump, dict):
+                try:
+                    bm25 = SimpleBM25Index.from_dict(coll_dump)
+                    if bm25.doc_ids:
+                        self.bm25_indices[coll_name] = bm25
+                        continue
+                except Exception as e:
+                    logger.warning(f"Ошибка восстановления BM25 из bm25_indices.json для {coll_name}: {e}")
+
+            # 2. Фоллбэк: сборка индекса из {coll_name}_chunks.json
             backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
             if backup_file.exists():
                 try:
@@ -151,18 +178,45 @@ class HybridRetriever:
                     bm25 = SimpleBM25Index()
                     bm25.build(chunks)
                     self.bm25_indices[coll_name] = bm25
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Ошибка сборки BM25 из {backup_file}: {e}")
+
+    def _get_cross_encoder(self):
+        """Ленивая загрузка настоящего Cross-Encoder реранкера (sentence-transformers)."""
+        if self._cross_encoder is not None:
+            return self._cross_encoder
+        if self._cross_encoder_failed:
+            return None
+
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info(f"Инициализация Cross-Encoder модели: {RERANKER_MODEL}")
+            self._cross_encoder = CrossEncoder(RERANKER_MODEL, max_length=512)
+            return self._cross_encoder
+        except Exception as e:
+            logger.warning(
+                f"Cross-Encoder ({RERANKER_MODEL}) недоступен ({e}). "
+                "Будет использована только лемма-эвристика."
+            )
+            self._cross_encoder_failed = True
+            return None
 
     def _dense_search(self, coll_name: str, query: str, top_k: int) -> List[Tuple[str, float, Dict[str, Any], str]]:
-        """Dense поиск в коллекции ChromaDB"""
+        """Dense поиск в коллекции ChromaDB с той же embedding-функцией, что использовалась при индексации."""
         results = []
         if not self.indexer.client:
             return results
 
         try:
-            coll = self.indexer.client.get_collection(coll_name)
-            res = coll.query(query_texts=[query], n_results=min(top_k, coll.count()))
+            emb_fn = self.indexer._init_embedding_function()
+            if emb_fn is not None:
+                coll = self.indexer.client.get_collection(name=coll_name, embedding_function=emb_fn)
+            else:
+                coll = self.indexer.client.get_collection(name=coll_name)
+            count = coll.count()
+            if count == 0:
+                return results
+            res = coll.query(query_texts=[query], n_results=min(top_k, count))
             if res and res["ids"] and len(res["ids"][0]) > 0:
                 for idx, c_id in enumerate(res["ids"][0]):
                     dist = res["distances"][0][idx] if res.get("distances") else 0.5
@@ -177,10 +231,13 @@ class HybridRetriever:
 
     def _rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Переранжирование (Cross-Encoder / Salience Re-ranking).
-        Использует лемматизацию pymorphy3 для нахождения разных словоформ
-        ('транспортный налог' <-> 'транспортного налога', 'гражданская ответственность' <-> 'гражданской ответственности').
+        Гибридное переранжирование в 2 этапа:
+        1. Дешевая эвристика (леммы pymorphy3 + номера статей + metadata priority) для сужения пула до 25 кандидатов.
+        2. Настоящий Cross-Encoder на топ-25 кандидатах (с плавным фоллбэком на эвристику, если модель недоступна).
         """
+        if not candidates:
+            return []
+
         q_lower = query.lower()
         q_lemmas = set(lemmatize_text(query))
 
@@ -215,72 +272,94 @@ class HybridRetriever:
             priority = item.get("metadata", {}).get("priority_level", "standard")
             boost = PRIORITY_HIGH_BOOST if priority == "high" else (PRIORITY_MEDIUM_BOOST if priority == "medium" else 1.0)
 
-            # Итоговый комбинированный балл реранкера (RRF базис)
             base_score = item.get("rrf_score", 0.02)
-            item["rerank_score"] = round(base_score * boost * lexical_multiplier * article_multiplier * norm_multiplier, 4)
+            h_score = round(base_score * boost * lexical_multiplier * article_multiplier * norm_multiplier, 4)
+            item["heuristic_score"] = h_score
+            item["rerank_score"] = h_score
 
-        # Сортировка по убыванию релевантности
-        reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-        return reranked
+        # Этап 1: сужаем до топ-N (25) кандидатов дешевой эвристикой
+        pre_ranked = sorted(candidates, key=lambda x: x["heuristic_score"], reverse=True)
+        top_n = max(1, CROSS_ENCODER_TOP_N)
+        shortlist = pre_ranked[:top_n]
+        tail = pre_ranked[top_n:]
+
+        # Этап 2: прогоняем настоящий Cross-Encoder на топ-25
+        cross_encoder = self._get_cross_encoder()
+        if cross_encoder is not None and shortlist:
+            try:
+                pairs = []
+                for item in shortlist:
+                    title = item.get("metadata", {}).get("title", "")
+                    doc_body = item.get("text", "")[:1500]
+                    pair_doc = f"{title}\n{doc_body}".strip() if title else doc_body
+                    pairs.append((query, pair_doc))
+
+                raw_scores = cross_encoder.predict(pairs)
+                max_h = max((item["heuristic_score"] for item in shortlist), default=1.0) or 1.0
+
+                for item, raw_val in zip(shortlist, raw_scores):
+                    logit = max(-50.0, min(50.0, float(raw_val)))
+                    ce_prob = 1.0 / (1.0 + math.exp(-logit))
+                    norm_h = item["heuristic_score"] / max_h
+                    item["cross_encoder_score"] = round(ce_prob, 4)
+                    # Основной вес — Cross-Encoder (80%), вспомогательный — доменная эвристика (20%)
+                    item["rerank_score"] = round(0.80 * ce_prob + 0.20 * norm_h, 4)
+
+                shortlist = sorted(shortlist, key=lambda x: x["rerank_score"], reverse=True)
+            except Exception as e:
+                logger.warning(f"Ошибка инференса Cross-Encoder ({e}). Используется эвристический порядок.")
+
+        return shortlist + tail
 
     def _stratified_selection(self, query: str, ranked_candidates: List[Dict[str, Any]], target_collections: List[str], top_k: int = 5) -> List[Dict[str, Any]]:
         """
-        Стратифицированный отбор строго по правилу состава итоговых 5 фрагментов:
-        - По умолчанию: 4 Нормативная база (legal_laws), 1 ВС РФ (court_cases);
-        - Если слова-триггеры на новости: 2 новости (auto_news), 3 Нормативная база (legal_laws);
-        - Если слова-триггеры на ПДД: 3 ПДД (traffic_rules), 2 Нормативная база (legal_laws);
-        - На авто пока не нужны триггеры.
+        Ослабленный мягкий стратифицированный отбор:
+        1. Основной порядок задает rerank_score (Cross-Encoder + эвристика), а не жесткие квоты.
+        2. Гарантируется максимум 1 наиболее релевантный уникальный документ из каждой целевой коллекции
+           ТОЛЬКО если его score сопоставим с лидером (>= 45% от max_score), чтобы не протаскивать шум.
+        3. Все оставшиеся слоты до top_k заполняются глобально по убыванию rerank_score
+           (с приоритетом уникальных parent_id документов).
         """
-        q_lower = query.lower()
-        has_pdd = any(k in q_lower for k in QueryRouter.PDD_KEYWORDS)
-        has_news = any(k in q_lower for k in QueryRouter.NEWS_KEYWORDS)
+        if not ranked_candidates:
+            return []
 
-        if has_pdd:
-            quotas = [(COLLECTION_PDD, 3), (COLLECTION_LAWS, 2)]
-        elif has_news:
-            quotas = [(COLLECTION_NEWS, 2), (COLLECTION_LAWS, 3)]
-        else:
-            quotas = [(COLLECTION_LAWS, 4), (COLLECTION_COURT, 1)]
+        max_score = max((item.get("rerank_score", 0.0) for item in ranked_candidates), default=0.0)
+        min_diversity_score = max_score * 0.45
 
         by_coll: Dict[str, List[Dict[str, Any]]] = {}
         for item in ranked_candidates:
             c = item.get("collection", "")
-            if c not in by_coll:
-                by_coll[c] = []
-            by_coll[c].append(item)
+            by_coll.setdefault(c, []).append(item)
 
-        selected = []
+        selected: List[Dict[str, Any]] = []
         selected_ids = set()
+        seen_parent_ids = set()
 
-        # 1. Заполняем квоты (с приоритетом уникальных статей/документов по parent_id)
-        for coll, count in quotas:
-            items_for_coll = by_coll.get(coll, [])
-            coll_selected = 0
-            coll_parent_ids = set()
-
-            # Первый проход: отбираем разные родительские статьи
-            for item in items_for_coll:
+        # 1. Мягкий пол разнообразия: не более 1 лучшего уникального представителя на целевую коллекцию (при достаточном скоре)
+        for coll in target_collections:
+            if len(selected) >= top_k:
+                break
+            for item in by_coll.get(coll, []):
+                if item.get("rerank_score", 0.0) < min_diversity_score:
+                    break
                 p_id = item.get("metadata", {}).get("parent_id", item["id"])
-                if item["id"] not in selected_ids and p_id not in coll_parent_ids:
+                if item["id"] not in selected_ids and p_id not in seen_parent_ids:
                     selected.append(item)
                     selected_ids.add(item["id"])
-                    coll_parent_ids.add(p_id)
-                    coll_selected += 1
-                    if coll_selected >= count:
-                        break
+                    seen_parent_ids.add(p_id)
+                    break
 
-            # Второй проход: если уникальных статей меньше квоты, добираем чанки
-            if coll_selected < count:
-                for item in items_for_coll:
-                    if item["id"] not in selected_ids:
-                        selected.append(item)
-                        selected_ids.add(item["id"])
-                        coll_selected += 1
-                        if coll_selected >= count:
-                            break
+        # 2. Остальные слоты (большинство) заполняем строго по глобальному rerank_score (уникальные parent_id)
+        for item in ranked_candidates:
+            if len(selected) >= top_k:
+                break
+            p_id = item.get("metadata", {}).get("parent_id", item["id"])
+            if item["id"] not in selected_ids and p_id not in seen_parent_ids:
+                selected.append(item)
+                selected_ids.add(item["id"])
+                seen_parent_ids.add(p_id)
 
-        # 2. Если в какой-то коллекции не хватило документов до квоты,
-        # добираем из общего пула кандидатов до 5 фрагментов
+        # 3. Если уникальных документов не хватило до top_k, добираем лучшие оставшиеся чанки
         if len(selected) < top_k:
             for item in ranked_candidates:
                 if len(selected) >= top_k:
@@ -289,6 +368,7 @@ class HybridRetriever:
                     selected.append(item)
                     selected_ids.add(item["id"])
 
+        selected.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
         return selected[:top_k]
 
     def retrieve(self, query: str, top_k: int = TOP_K_RERANK) -> Dict[str, Any]:

@@ -44,15 +44,19 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
       setLoading(true);
       try {
         if (activeDocId) {
+          const docParams = new URLSearchParams({ docId: activeDocId });
+          if (selectedCode && selectedCode !== 'Все акты') {
+            docParams.set('code', selectedCode);
+          }
           const res = await apiFetch<{
             doc: LegalChapterDoc | null;
             codes: string[];
             categories: string[];
-          }>(`/api/kb/legal?docId=${encodeURIComponent(activeDocId)}`);
+          }>(`/api/kb/legal?${docParams.toString()}`);
           if (!cancelled) {
             setOpenedDoc(res.doc);
             if (res.codes?.length) setCodes(res.codes);
-            if (res.categories?.length) setCategories(res.categories);
+            if (res.categories) setCategories(res.categories);
           }
         } else {
           setOpenedDoc(null);
@@ -75,7 +79,15 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
             setTotalFiltered(res.totalFiltered || 0);
             setTruncated(Boolean(res.truncated));
             if (res.codes?.length) setCodes(res.codes);
-            if (res.categories?.length) setCategories(res.categories);
+            if (res.categories) {
+              setCategories(res.categories);
+              if (
+                selectedCategory !== 'Все категории' &&
+                !res.categories.includes(selectedCategory)
+              ) {
+                setSelectedCategory('Все категории');
+              }
+            }
           }
         }
       } catch {
@@ -192,6 +204,7 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
                 onChange={(e) => {
                   onSelectDoc(null);
                   setSelectedCode(e.target.value);
+                  setSelectedCategory('Все категории');
                 }}
                 className="w-full px-3 py-2 text-xs rounded-lg border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-blue-600"
               >
@@ -238,7 +251,7 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
                     onSelectDoc(null);
                     setSearchQuery(e.target.value);
                   }}
-                  placeholder="Например: 33, лизинг, выкуп, налог..."
+                  placeholder="Например: 615, лизинг, выкуп, налог..."
                   className="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-[#CBD5E1] dark:border-[#334155] bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-blue-600"
                 />
               </div>

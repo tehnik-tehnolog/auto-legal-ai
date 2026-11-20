@@ -205,12 +205,17 @@ async function startServer(): Promise<void> {
   app.get('/api/kb/legal', (req: Request, res: Response) => {
     const allDocs = ragEngine.getLegalDocs();
     const docId = String(req.query.docId || '').trim();
+    const code = String(req.query.code || 'Все акты').trim();
 
     const codes = Array.from(
       new Set(allDocs.map((d) => d.code || d.section || '').filter(Boolean))
     ).sort();
+    const docsForCategories =
+      code && code !== 'Все акты'
+        ? allDocs.filter((d) => d.code === code || d.section === code)
+        : allDocs;
     const categories = Array.from(
-      new Set(allDocs.map((d) => d.category || '').filter(Boolean))
+      new Set(docsForCategories.map((d) => d.category || '').filter(Boolean))
     ).sort();
 
     if (docId) {
@@ -232,14 +237,10 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const code = String(req.query.code || 'Все акты').trim();
     const category = String(req.query.category || 'Все категории').trim();
     const q = String(req.query.q || '').trim().toLowerCase();
 
-    let filtered = allDocs;
-    if (code && code !== 'Все акты') {
-      filtered = filtered.filter((d) => d.code === code || d.section === code);
-    }
+    let filtered = docsForCategories;
     if (category && category !== 'Все категории') {
       filtered = filtered.filter((d) => d.category === category);
     }

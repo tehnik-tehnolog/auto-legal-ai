@@ -1,6 +1,6 @@
 """
 Индексатор ChromaDB с поддержкой раздельных коллекций и хранилища родительских документов.
-Обеспечивает детальный консольный вывод процесса индексации для PyCharm и логирование.
+Обеспечивает детальный консольный вывод процесса индексации и логирование.
 """
 
 import json
@@ -77,6 +77,15 @@ def lemmatize_text(text: str) -> List[str]:
     return [lemmatize_word(t) for t in tokens]
 
 
+def _resolve_embedding_model_name(model_name: str) -> str:
+    """Преобразует сокращенные имена моделей эмбеддингов в корректные ID HuggingFace."""
+    aliases = {
+        "bge-m3": "BAAI/bge-m3",
+    }
+    cleaned = (model_name or "BAAI/bge-m3").strip()
+    return aliases.get(cleaned, cleaned)
+
+
 class SimpleBM25Index:
     """
     Легковесный ин-мемори лексический индекс BM25 с морфологической лемматизацией (pymorphy3).
@@ -98,6 +107,8 @@ class SimpleBM25Index:
         self.corpus = []
         self.docs_map = {}
         self.doc_freqs = {}
+        self.idf = {}
+        self.avgdl = 0.0
 
         for chunk in chunks:
             c_id = chunk["id"]
@@ -114,6 +125,70 @@ class SimpleBM25Index:
             self.avgdl = sum(len(doc) for doc in self.corpus) / n_docs
             for token, freq in self.doc_freqs.items():
                 self.idf[token] = math.log(1 + (n_docs - freq + 0.5) / (freq + 0.5))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Сериализация полного состояния BM25-индекса (лемматизированный корпус, IDF, чанки) в JSON."""
+        chunks_list = [self.docs_map[c_id] for c_id in self.doc_ids if c_id in self.docs_map]
+        return {
+            "doc_ids": self.doc_ids,
+            "corpus": self.corpus,
+            "chunks": chunks_list,
+            "avgdl": self.avgdl,
+            "doc_freqs": self.doc_freqs,
+            "idf": self.idf,
+            "vocab_size": len(self.doc_freqs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SimpleBM25Index":
+        """Восстановление BM25-индекса из JSON без повторной лемматизации."""
+        idx = cls()
+        if not isinstance(data, dict):
+            return idx
+
+        if "corpus" in data and "doc_ids" in data and "idf" in data:
+            idx.doc_ids = list(data.get("doc_ids", []))
+            idx.corpus = [list(tokens) for tokens in data.get("corpus", [])]
+            idx.avgdl = float(data.get("avgdl", 0.0) or 0.0)
+            idx.doc_freqs = {str(k): int(v) for k, v in data.get("doc_freqs", {}).items()}
+            idx.idf = {str(k): float(v) for k, v in data.get("idf", {}).items()}
+
+            chunks = data.get("chunks")
+            if isinstance(chunks, list) and chunks:
+                for chunk in chunks:
+                    c_id = chunk.get("id")
+                    if c_id is not None:
+                        idx.docs_map[c_id] = chunk
+            else:
+                texts = data.get("texts") or []
+                metas = data.get("metas") or []
+                for i, c_id in enumerate(idx.doc_ids):
+                    idx.docs_map[c_id] = {
+                        "id": c_id,
+                        "text": texts[i] if i < len(texts) else "",
+                        "metadata": metas[i] if i < len(metas) else {},
+                    }
+
+            if idx.avgdl == 0.0 and idx.corpus:
+                idx.avgdl = sum(len(doc) for doc in idx.corpus) / len(idx.corpus)
+            return idx
+
+        # Обратная совместимость со старым форматом bm25_indices.json (без corpus/idf)
+        if "ids" in data and "texts" in data:
+            ids = data.get("ids", [])
+            texts = data.get("texts", [])
+            metas = data.get("metas", [])
+            chunks = [
+                {
+                    "id": ids[i],
+                    "text": texts[i] if i < len(texts) else "",
+                    "metadata": metas[i] if i < len(metas) else {},
+                }
+                for i in range(len(ids))
+            ]
+            idx.build(chunks)
+
+        return idx
 
     def search(self, query: str, top_k: int = 20, k1: float = 1.5, b: float = 0.75) -> List[Tuple[str, float]]:
         q_tokens = self.tokenize(query)
@@ -143,7 +218,7 @@ class SimpleBM25Index:
 
 
 class ChromaRAGIndexer:
-    """Управление 4 коллекциями ChromaDB и родительским хранилищем с детальным логированием"""
+    """Управление 5 коллекциями ChromaDB и родительским хранилищем с детальным логированием"""
 
     def __init__(self):
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,6 +226,8 @@ class ChromaRAGIndexer:
         self.bm25_store_path = CHROMA_DIR / "bm25_indices.json"
         self.parent_store: Dict[str, Dict[str, Any]] = {}
         self.client = None
+        self.embedding_function = None
+        self._embedding_init_attempted = False
         self._init_client()
 
     def _init_client(self):
@@ -169,6 +246,36 @@ class ChromaRAGIndexer:
         except Exception as e:
             logger.warning(f"ChromaDB клиент не инициализирован ({e}). Будет использован локальный индекс.")
             self.client = None
+
+    def _init_embedding_function(self):
+        """Инициализация SentenceTransformerEmbeddingFunction для ChromaDB по модели EMBEDDING_MODEL."""
+        if self.embedding_function is not None:
+            return self.embedding_function
+        if self._embedding_init_attempted or self.client is None:
+            return self.embedding_function
+
+        self._embedding_init_attempted = True
+        hf_model = _resolve_embedding_model_name(EMBEDDING_MODEL)
+        try:
+            from chromadb.utils import embedding_functions
+
+            try:
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=hf_model,
+                    normalize_embeddings=True,
+                )
+            except TypeError:
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=hf_model,
+                )
+            logger.info(f"Embedding-функция ChromaDB инициализирована: {hf_model}")
+        except Exception as e:
+            logger.warning(
+                f"Не удалось загрузить SentenceTransformerEmbeddingFunction ({hf_model}): {e}. "
+                "ChromaDB будет использовать встроенный эмбеддер по умолчанию."
+            )
+            self.embedding_function = None
+        return self.embedding_function
 
     def load_parent_store(self) -> Dict[str, Dict[str, Any]]:
         if self.parent_store_path.exists():
@@ -310,9 +417,11 @@ class ChromaRAGIndexer:
         ]
 
         chroma_active = bool(self.client is not None)
+        emb_fn = self._init_embedding_function() if chroma_active else None
         if verbose:
             mode_str = "PersistentClient (нативно на диске)" if chroma_active else "Локальный JSON-индекс (модуль chromadb не найден)"
-            print(f"  Режим ChromaDB: {mode_str}")
+            emb_str = _resolve_embedding_model_name(EMBEDDING_MODEL) if emb_fn is not None else "Chroma default / BM25"
+            print(f"  Режим ChromaDB: {mode_str} (эмбеддер: {emb_str})")
 
         bm25_indices_dump = {}
 
@@ -327,7 +436,7 @@ class ChromaRAGIndexer:
                 stats["collections"][coll_name] = 0
                 continue
 
-            # Добавляем в ChromaDB при наличии клиента
+            # Добавляем в ChromaDB при наличии клиента и embedding-функции
             if self.client:
                 try:
                     try:
@@ -335,10 +444,13 @@ class ChromaRAGIndexer:
                     except Exception:
                         pass
 
-                    coll = self.client.get_or_create_collection(
-                        name=coll_name,
-                        metadata={"hnsw:space": "cosine"}
-                    )
+                    coll_kwargs: Dict[str, Any] = {
+                        "name": coll_name,
+                        "metadata": {"hnsw:space": "cosine"},
+                    }
+                    if emb_fn is not None:
+                        coll_kwargs["embedding_function"] = emb_fn
+                    coll = self.client.get_or_create_collection(**coll_kwargs)
 
                     ids = [c["id"] for c in chunks]
                     docs = [c["text"] for c in chunks]
@@ -365,16 +477,10 @@ class ChromaRAGIndexer:
                     if verbose:
                         print(f"    - Ошибка ChromaDB: {ex}")
 
-            # Подготовка данных для BM25
+            # Подготовка и полная сериализация индекса BM25
             bm25 = SimpleBM25Index()
             bm25.build(chunks)
-            bm25_indices_dump[coll_name] = {
-                "ids": [c["id"] for c in chunks],
-                "texts": [c["text"] for c in chunks],
-                "metas": [c["metadata"] for c in chunks],
-                "avgdl": round(bm25.avgdl, 2),
-                "vocab_size": len(bm25.doc_freqs)
-            }
+            bm25_indices_dump[coll_name] = bm25.to_dict()
 
             # Сохранение резервного JSON с чанками
             chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
@@ -395,7 +501,7 @@ class ChromaRAGIndexer:
             print("-" * 76)
 
         with open(self.bm25_store_path, "w", encoding="utf-8") as f:
-            json.dump(bm25_indices_dump, f, ensure_ascii=False, indent=2)
+            json.dump(bm25_indices_dump, f, ensure_ascii=False)
 
         bm25_size_kb = round(self.bm25_store_path.stat().st_size / 1024, 1) if self.bm25_store_path.exists() else 0
         if verbose:
@@ -494,7 +600,8 @@ class ChromaRAGIndexer:
         self.save_parent_store()
         stats["parent_docs_count"] = len(self.parent_store)
 
-        # 5. Обновляем ChromaDB и BM25
+        # 5. Обновляем ChromaDB (с явной embedding-функцией) и BM25
+        emb_fn = self._init_embedding_function() if self.client else None
         for coll_name, (chunks, parents, label) in chunks_map.items():
             c_len = len(chunks)
             if verbose:
@@ -508,27 +615,32 @@ class ChromaRAGIndexer:
                         pass
 
                     if chunks:
-                        coll = self.client.get_or_create_collection(
-                            name=coll_name,
-                            metadata={"hnsw:space": "cosine"}
-                        )
+                        coll_kwargs: Dict[str, Any] = {
+                            "name": coll_name,
+                            "metadata": {"hnsw:space": "cosine"},
+                        }
+                        if emb_fn is not None:
+                            coll_kwargs["embedding_function"] = emb_fn
+                        coll = self.client.get_or_create_collection(**coll_kwargs)
+
                         ids = [c["id"] for c in chunks]
                         docs = [c["text"] for c in chunks]
                         metas = [c["metadata"] for c in chunks]
-                        coll.add(ids=ids, documents=docs, metadatas=metas)
+                        batch_size = 100
+                        for start in range(0, c_len, batch_size):
+                            end = min(start + batch_size, c_len)
+                            coll.add(
+                                ids=ids[start:end],
+                                documents=docs[start:end],
+                                metadatas=metas[start:end],
+                            )
                 except Exception as ex:
                     logger.warning(f"Ошибка выборочного обновления Chroma ({coll_name}): {ex}")
 
-            # Обновление индекса BM25 для этой коллекции
+            # Обновление и полная сериализация индекса BM25 для этой коллекции
             bm25 = SimpleBM25Index()
             bm25.build(chunks)
-            bm25_store[coll_name] = {
-                "ids": [c["id"] for c in chunks],
-                "texts": [c["text"] for c in chunks],
-                "metas": [c["metadata"] for c in chunks],
-                "avgdl": round(bm25.avgdl, 2),
-                "vocab_size": len(bm25.doc_freqs)
-            }
+            bm25_store[coll_name] = bm25.to_dict()
 
             # Сохранение резервного JSON с чанками
             chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
@@ -540,7 +652,7 @@ class ChromaRAGIndexer:
 
         # Сохраняем объединенный BM25 файл
         with open(self.bm25_store_path, "w", encoding="utf-8") as f:
-            json.dump(bm25_store, f, ensure_ascii=False, indent=2)
+            json.dump(bm25_store, f, ensure_ascii=False)
 
         t_total = round(time.time() - t_start, 2)
         stats["duration_sec"] = t_total

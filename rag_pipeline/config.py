@@ -1,6 +1,6 @@
 """
-Конфигурация RAG-пайплайна для компании по раскату авто.
-Поддерживает работу на Windows 10 (локальный ПК), Linux/Docker и Render.com (Free Tier).
+Конфигурация RAG-пайплайна.
+Поддерживает работу на Windows, Linux/Docker и Render.com.
 """
 
 import os
@@ -48,8 +48,9 @@ ALL_COLLECTIONS = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_CARS, COLLECTIO
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemini-3.1-flash-lite-preview")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Модель эмбеддингов
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+# Модель эмбеддингов и Cross-Encoder реранкер
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 
 # Режим ChromaDB (на Render Free Tier 512MB RAM по умолчанию используется легкий BM25+pymorphy3 если ENABLE_CHROMA=auto)
 IS_RENDER = os.getenv("RENDER", "").lower() == "true" or bool(os.getenv("RENDER_SERVICE_ID"))
@@ -58,6 +59,7 @@ ENABLE_CHROMA = os.getenv("ENABLE_CHROMA", "auto").lower()
 # Параметры поиска
 TOP_K_RETRIEVAL = int(os.getenv("TOP_K_RETRIEVAL", "20"))
 TOP_K_RERANK = int(os.getenv("TOP_K_RERANK", "5"))
+CROSS_ENCODER_TOP_N = int(os.getenv("CROSS_ENCODER_TOP_N", "50"))
 
 # Коэффициент буста для высокоприоритетных норм (лизинг, аренда ТС, выкуп)
 PRIORITY_HIGH_BOOST = 1.35

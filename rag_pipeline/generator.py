@@ -26,6 +26,7 @@ from rag_pipeline.config import (
     MODEL_NAME,
 )
 from rag_pipeline.retriever import HybridRetriever
+from rag_pipeline.promts import (SYSTEM_PROMPT, TOPIC_PROMPT)
 
 # Настройка специализированного логгера для Gemini и конвейера
 logger = logging.getLogger("rag_generator")
@@ -37,20 +38,6 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _fh = logging.FileHandler(GEMINI_LOG_FILE, encoding="utf-8")
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
 logger.addHandler(_fh)
-
-
-SYSTEM_PROMPT = """Ты — юридический RAG ассистент компании, специализирующейся на аренде автомобилей с последующим выкупом (раскате) в Российской Федерации.
-
-Твоя задача — проанализировать вопрос юриста компании и предоставленные фрагменты кодексов (ГК, НК, КоАП) вместе со ссылками на них. И дать ответ.
-
-Правила работы с контекстом и источниками:
-0. Без приветствий и прелюдий переходи сразу к ответу на вопрос.
-1. Если переданные статьи и ссылки релевантны вопросу, активно используй их в тексте ответа, ссылаясь на конкретные нормы. [Название статьи/закона](URL_ИЗ_БЛОКА_ИСТОЧНИКА).
-2. Если предоставленный контекст нерелевантен или его недостаточно, опирайся на свои глубокие знания законодательства РФ. Ссылайся на актуальные нормы права, учитывая практику и официальные источники (приоритетно на портал docs.cntd.ru). [Об обязательном страховании гражданской ответственности владельцев транспортных средств](https://docs.cntd.ru/document/901817083).
-3. Всегда адаптируй ответ под специфику бизнеса компании (раскат, аренда транспортных средств с выкупом, учет на балансе, риски и налоговые последствия) в правовом поле РФ(важно).
-4. Оформляй итоговый ответ в структурированном виде с использованием разметки Markdown.
-"""
-
 
 def _log_gemini_error(event_type: str, query: str, reason: str, details: str = "", tb: str = ""):
     """Запись подробного отчета об ошибке в logs/gemini_connection.log"""
@@ -119,16 +106,7 @@ class RAGAssistant:
             return [], False
 
         try:
-            topic_prompt = (
-                "Ты — ведущий юрисконсульт по российскому законодательству. "
-                "Проанализируй юридический вопрос юриста компании по аренде и выкупу авто (раскату):\n"
-                f"\"{query}\"\n\n"
-                "Сформулируй от 2 до 6 конкретных поисковых тем/подзапросов для поиска релевантных статей "
-                "в Гражданском кодексе РФ, Налоговом кодексе РФ, КоАП РФ, 164-ФЗ 'О лизинге', 40-ФЗ 'Об ОСАГО' и ПДД РФ. "
-                "Каждая тема должна содержать 2-4 ключевых слова в именительном падеже (например: "
-                "'расторжение договора аренды', 'изъятие транспортного средства', 'неустойка и штрафные санкции').\n"
-                "Ответь ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом строк. Без комментариев и Markdown-разметки."
-            )
+            topic_prompt = TOPIC_PROMPT(query)
             res = active_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=topic_prompt,
@@ -426,7 +404,9 @@ class RAGAssistant:
     def _extractive_fallback_generation(
         self,
         query: str,
-        sources: List[Dict[str, Any]],
+        sources:
+
+        List[Dict[str, Any]],
         reason: Optional[str] = None
     ) -> str:
         """Локальный генератор на случай отсутствия API-ключа Gemini или сетевых сбоев"""
@@ -437,7 +417,7 @@ class RAGAssistant:
         if reason and "GEMINI_API_KEY" in reason:
             parts.append(
                 "> 💡 *Примечание: Для подключения генеративной нейросети Gemini 3.1 Flash Lite укажите "
-                "`GEMINI_API_KEY` в файле `.env` или настройках PyCharm. Логи: `logs/gemini_connection.log`.*\n"
+                "`GEMINI_API_KEY` в файле `.env` или настройках IDE. Логи: `logs/gemini_connection.log`.*\n"
             )
 
         laws_sources = [s for s in sources if s["collection"] == COLLECTION_LAWS]

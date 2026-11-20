@@ -1,6 +1,6 @@
 @echo off
 :: ==============================================================================
-:: Запуск коллекторов RAG на Windows 10 (локальный ПК / PyCharm)
+:: Запуск коллекторов RAG на Windows локально
 :: Использование:
 ::   run_collectors.bat cars     (сбор машин raskatof.ru)
 ::   run_collectors.bat news     (сбор автоновостей)
@@ -13,7 +13,7 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-:: Проверяем наличие виртуального окружения PyCharm/venv
+:: Проверяем наличие виртуального окружения /venv
 if exist "venv\Scripts\python.exe" (
     set "PY_CMD=venv\Scripts\python.exe"
 ) else if exist ".venv\Scripts\python.exe" (

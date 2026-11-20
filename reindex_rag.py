@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Скрипт переиндексации базы данных RAG в ChromaDB с иерархическим чанкингом.
-Запуск локально в PyCharm / Windows 10:
+Запуск локально:
     python reindex_rag.py
 """
 

@@ -1,4 +1,4 @@
-# Деплой на Render.com (Free Tier, Node.js + React)
+# Деплой на Render.com (Node.js + React)
 
 Приложение работает как единый сервис **Express (Node.js) + React** и подготовлено для **Render.com Free Tier** (без постоянного диска и shell, с засыпанием через 15 минут неактивности):
 

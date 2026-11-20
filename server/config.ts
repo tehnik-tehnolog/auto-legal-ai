@@ -47,7 +47,7 @@ export const TOP_K_RERANK = Number(process.env.TOP_K_RERANK || 5);
 export const PRIORITY_HIGH_BOOST = 1.35;
 export const PRIORITY_MEDIUM_BOOST = 1.15;
 
-// Supabase PostgreSQL configuration with Render Free Tier PORT & Linux USER guards
+// Supabase PostgreSQL configuration with Render PORT & Linux USER guards
 export const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
 export const SUPABASE_HOST = (
   process.env.HOST ||
