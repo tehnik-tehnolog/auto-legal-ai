@@ -6,7 +6,7 @@ try:
 except ImportError:
     pass
 
-# Базовые директории
+# Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = (
     BASE_DIR.parent
@@ -15,7 +15,7 @@ PROJECT_ROOT = (
 )
 DATA_DIR = Path(os.getenv("RAG_DATA_DIR", PROJECT_ROOT / "data"))
 
-# Поддиректории для каждого источника данных
+# Subdirectories per data source
 LEGAL_DIR = DATA_DIR / "legal"
 COURT_DIR = DATA_DIR / "court"
 CARS_DIR = DATA_DIR / "cars"
@@ -23,7 +23,7 @@ NEWS_DIR = DATA_DIR / "news"
 PDD_DIR = DATA_DIR / "pdd"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Единый файл нормативной базы и файлы структурированных глав/статей
+# Unified regulatory KB file and structured chapters/articles JSONL files
 LEGAL_JSONL_FILE = LEGAL_DIR / "laws_gk_nk.jsonl"
 LEGAL_CHAPTERS_FILE = LEGAL_DIR / "legal_chapters.jsonl"
 PDD_RULES_FILE = PDD_DIR / "pdd_rules_rag.json"
@@ -31,22 +31,22 @@ PDD_CHAPTERS_FILE = PDD_DIR / "pdd_chapters.jsonl"
 PDD_PDF_FILE = PDD_DIR / "Pravila_dorozhnogo_dvizheniya.pdf"
 PDD_PDF_URL = "https://xn--b1aew.xn--p1ai/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf"
 
-# Создание необходимых директорий
+# Ensure required directories exist
 for directory in [LEGAL_DIR, COURT_DIR, CARS_DIR, NEWS_DIR, PDD_DIR, LOGS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-# Настройки HTTP и браузера
+# HTTP and browser settings
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "30"))
 USER_AGENT = os.getenv(
     "USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
-# API Ключи
+# API keys
 NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "pub_f09cd847b3d74c7492d4dcec897dedb6")
 
-# Целевые нормативные акты (ГК РФ, НК РФ, КоАП РФ, законы об авто, лизинге, ОСАГО, регистрации)
-# Категории сохраняют естественные пробелы (без замены на подчеркивания)
+# Target regulatory acts (Civil Code, Tax Code, Administrative Code, transport/leasing/OSAGO/registration laws).
+# Categories preserve natural spaces for UI filtering.
 CNTD_PRIMARY_LAWS = [
     {
         "title": "ГРАЖДАНСКИЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ ЧАСТЬ ПЕРВАЯ (с изменениями на 22 октября 2026 года)",
@@ -162,10 +162,10 @@ CNTD_PRIMARY_LAWS = [
     }
 ]
 
-# Настройки для Верховного Суда РФ
+# Supreme Court of the Russian Federation search settings
 VSRF_URL = "https://www.vsrf.ru/documents"
 VSRF_YEARS = ["2021", "2022", "2023", "2024", "2025", "2026"]
 VSRF_KEYWORD = "автомобиль"
 
-# Настройки для raskatof.ru
+# raskatof.ru catalog settings
 RASKATOF_URL = "https://raskatof.ru/"

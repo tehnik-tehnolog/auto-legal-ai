@@ -9,7 +9,7 @@ from typing import Any, Dict
 from config.settings import LOGS_DIR
 
 def setup_logger(name: str) -> logging.Logger:
-    """Настройка структурированного логирования для сервера"""
+    """Configure structured logging for stdout and log files."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
 
@@ -19,12 +19,12 @@ def setup_logger(name: str) -> logging.Logger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        # Вывод в консоль (stdout для Docker и systemd journal)
+        # Console output (stdout for containers and systemd journal)
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-        # Вывод в файл лога
+        # File log output
         log_file = LOGS_DIR / f"{name}.log"
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
@@ -34,7 +34,7 @@ def setup_logger(name: str) -> logging.Logger:
 
 
 class BaseCollector(ABC):
-    """Базовый абстрактный класс для всех серверных коллекторов данных RAG"""
+    """Abstract base class for all RAG data collectors."""
 
     def __init__(self, name: str):
         self.name = name
@@ -51,11 +51,11 @@ class BaseCollector(ABC):
 
     @abstractmethod
     async def collect(self) -> Dict[str, Any]:
-        """Основной метод сбора данных, реализуемый каждым коллектором"""
+        """Main data collection coroutine implemented by each collector."""
         pass
 
     async def run(self) -> Dict[str, Any]:
-        """Безопасный запуск с замером времени и сбором метрик"""
+        """Safe collector runner with duration tracking and error handling."""
         start_time = time.time()
         self.stats["started_at"] = datetime.now().isoformat()
         self.logger.info(f"=== Запуск коллектора [{self.name}] ===")

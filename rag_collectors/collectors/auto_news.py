@@ -42,7 +42,7 @@ FALLBACK_RSS_FEEDS = [
 
 
 def clean_mojibake(text: str) -> str:
-    """Очистка поврежденной кодировки"""
+    """Fix Latin-1/UTF-8 mojibake encoding artifacts."""
     if not text:
         return ""
     if "Ð" in text or "Ñ" in text or "Â" in text:
@@ -55,9 +55,9 @@ def clean_mojibake(text: str) -> str:
 
 class AutoNewsCollector(BaseCollector):
     """
-    Коллектор автомобильных новостей и аналитики авторынка РФ.
-    Регламент запуска: Раз в неделю.
-    Формат: latest_autonews.json (page_content + metadata).
+    Collector for automotive news and market analytics.
+    Schedule: Weekly.
+    Output format: latest_autonews.json (page_content + metadata).
     """
 
     def __init__(self):
@@ -71,7 +71,7 @@ class AutoNewsCollector(BaseCollector):
         })
 
     def fetch_full_text(self, url: str) -> str:
-        """Извлечение полного текста статьи с новостного сайта"""
+        """Extract full article body text from news webpage."""
         try:
             resp = self.session.get(url, timeout=10)
             if resp.status_code == 200:
@@ -98,7 +98,7 @@ class AutoNewsCollector(BaseCollector):
         return ""
 
     def collect_from_rss_fallback(self, existing_urls: Set[str], limit: int = 50) -> List[Dict[str, Any]]:
-        """Фоллбэк на официальные RSS-ленты автомобильных СМИ РФ, если API исчерпало лимит"""
+        """Fallback to automotive RSS feeds when NewsData API quota is exhausted."""
         self.logger.info("Сбор новостей через резервные RSS-ленты...")
         rss_docs = []
 
@@ -156,7 +156,7 @@ class AutoNewsCollector(BaseCollector):
         seen_titles: Set[str] = set()
         rag_documents: List[Dict[str, Any]] = []
 
-        # Загрузка существующих новостей для предотвращения дублей
+        # Load existing news URLs to avoid duplicates
         if self.output_file.exists():
             try:
                 with open(self.output_file, "r", encoding="utf-8") as f:
@@ -225,12 +225,12 @@ class AutoNewsCollector(BaseCollector):
                 except Exception as api_err:
                     self.logger.warning(f"Ошибка запроса API для {q}: {api_err}")
 
-        # Если через API собрано мало статей (или закончились кредиты) — подключаем RSS фоллбэк
+        # Fallback to RSS if API yielded too few articles or ran out of quota
         if len(rag_documents) < 20:
             fallback_items = self.collect_from_rss_fallback(unique_urls, limit=50 - len(rag_documents))
             rag_documents.extend(fallback_items)
 
-        # Сохранение итогового файла
+        # Save output JSON file
         with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(rag_documents, f, ensure_ascii=False, indent=2)
 

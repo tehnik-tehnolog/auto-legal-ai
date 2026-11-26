@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Мастер-скрипт запуска коллекторов данных для RAG-ассистента раската авто в РФ.
-Поддерживает запуск отдельных коллекторов по крону, пакетный запуск и проверку статуса базы.
+Master orchestrator script for RAG data collectors.
+Supports running individual collectors on a schedule, batch execution, and KB status inspection.
 """
 
 import argparse
@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Добавляем корневую директорию в PYTHONPATH
+# Add rag_collectors directory to PYTHONPATH
 current_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(current_dir))
 
@@ -20,12 +20,12 @@ from config.settings import CARS_DIR, COURT_DIR, DATA_DIR, LEGAL_DIR, NEWS_DIR
 
 
 def print_status_dashboard():
-    """Вывод актуального состояния собранной RAG-базы на сервере"""
+    """Print current status of collected RAG knowledge base files."""
     print("\n" + "=" * 70)
     print("📊 ТЕКУЩЕЕ СОСТОЯНИЕ БАЗЫ ДАННЫХ RAG (РАСКАТ АВТО)")
     print("=" * 70)
 
-    # 1. Законы (ГК РФ / НК РФ)
+    # 1. Regulatory codes (Civil Code / Tax Code)
     jsonl_file = LEGAL_DIR / "laws_gk_nk.jsonl"
     jsonl_count = 0
     tax_count = 0
@@ -54,7 +54,7 @@ def print_status_dashboard():
     print(f"   - Директория:       {LEGAL_DIR}")
     print(f"   - Регламент:        Раз в 3 месяца")
 
-    # 2. Судебная практика ВС РФ
+    # 2. Supreme Court case law
     vsrf_file = COURT_DIR / "vsrf_court_docs_rag.json"
     vsrf_count = 0
     if vsrf_file.exists():
@@ -68,7 +68,7 @@ def print_status_dashboard():
     print(f"   - Файл:             {vsrf_file}")
     print(f"   - Регламент:        Раз в месяц")
 
-    # 3. Ассортимент машин raskatof.ru
+    # 3. Vehicle catalog (raskatof.ru)
     cars_file = CARS_DIR / "cars_raskatof.json"
     cars_count = 0
     if cars_file.exists():
@@ -82,7 +82,7 @@ def print_status_dashboard():
     print(f"   - Файл:             {cars_file}")
     print(f"   - Регламент:        Раз в неделю")
 
-    # 4. Автомобильные новости
+    # 4. Automotive news
     news_file = NEWS_DIR / "latest_autonews.json"
     news_count = 0
     if news_file.exists():
@@ -96,7 +96,7 @@ def print_status_dashboard():
     print(f"   - Файл:             {news_file}")
     print(f"   - Регламент:        Раз в неделю")
 
-    # 5. ПДД РФ (ГИБДД РФ PDF)
+    # 5. Russian Traffic Rules (PDD PDF)
     from config.settings import PDD_DIR, PDD_RULES_FILE
     pdd_count = 0
     if PDD_RULES_FILE.exists():
@@ -112,12 +112,8 @@ def print_status_dashboard():
     print("=" * 70 + "\n")
 
 
-async def run_collector(collector_name: str) -> bool:
-    """Запуск выбранного коллектора"""
-    from collectors.auto_news import AutoNewsCollector
-    from collectors.gk_nk_laws import LawsCollector
-    from collectors.pdd import PDDCollector
 async def run_collector(collector_name: str, test_mode: bool = False) -> bool:
+    """Run the selected collector by name (or all collectors)."""
     from collectors.auto_news import AutoNewsCollector
     from collectors.gk_nk_laws import LawsCollector
     from collectors.pdd import PDDCollector

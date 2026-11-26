@@ -1,10 +1,11 @@
 """
-Иерархический чанкинг (Parent-Document / Small-to-Big).
-Разбивает тяжелые 20 000 статей и постановлений ВС РФ на компактные
-семантические фрагменты для точного поиска, сохраняя связь с полным контекстом.
+Hierarchical chunking (Parent-Document / Small-to-Big).
+Splits ~20,000 legal articles and Supreme Court rulings into compact semantic chunks
+for accurate retrieval while preserving full parent document context.
 """
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
@@ -12,6 +13,8 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+logger = logging.getLogger("rag_chunker")
 
 from rag_pipeline.config import (
     CARS_DIR,
@@ -29,10 +32,10 @@ from rag_pipeline.config import (
 
 def split_article_into_chunks(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
     """
-    Разбивает юридический документ по статьям (а не по отдельным абзацам).
-    Если статья небольшая (<= max_chars) — сохраняется как единый целый чанк.
-    Если статья большая — дробится на связные фрагменты размером до max_chars
-    с сохранением смысловых границ абзацев и предложений (минимум min_chars).
+    Split a legal document by article boundaries.
+    Short articles (<= max_chars) are kept intact as a single chunk.
+    Larger articles are split into coherent fragments up to max_chars
+    preserving paragraph and sentence boundaries (minimum min_chars).
     """
     cleaned = text.strip()
     if not cleaned:
@@ -46,12 +49,12 @@ def split_article_into_chunks(text: str, max_chars: int = 400, min_chars: int = 
 
     for para in paragraphs:
         if len(para) > max_chars:
-            # Если текущий накопленный буфер есть — сохраняем
+            # Flush accumulated buffer if non-empty
             if current_chunk:
                 if len(current_chunk) >= min_chars:
                     chunks.append(current_chunk)
                 current_chunk = ""
-            # Дробим длинный абзац по предложениям
+            # Split long paragraph by sentence boundaries
             sentences = re.split(r'(?<=[.!?])\s+', para)
             for s in sentences:
                 s = s.strip()
@@ -75,7 +78,7 @@ def split_article_into_chunks(text: str, max_chars: int = 400, min_chars: int = 
         if len(current_chunk) >= min_chars:
             chunks.append(current_chunk)
         elif chunks:
-            # Объединяем короткий остаток с предыдущим чанком
+            # Merge short trailing remainder with previous chunk
             chunks[-1] = f"{chunks[-1]}\n\n{current_chunk}".strip()
         else:
             chunks.append(current_chunk)
@@ -84,15 +87,12 @@ def split_article_into_chunks(text: str, max_chars: int = 400, min_chars: int = 
 
 
 def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80) -> List[str]:
-    """
-    Разбивает юридический текст на смысловые пункты и абзацы,
-    отсекая мусорные пустые строки.
-    """
+    """Split legal text into semantic clauses and paragraphs, discarding empty lines."""
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks = []
 
     for para in paragraphs:
-        # Если абзац слишком длинный — делим по предложениям
+        # Split oversized paragraphs by sentence boundaries
         if len(para) > max_chars:
             sentences = re.split(r'(?<=[.!?])\s+', para)
             curr = ""
@@ -112,19 +112,18 @@ def split_text_into_clauses(text: str, max_chars: int = 400, min_chars: int = 80
 
 
 class RAGChunker:
-    """Универсальный чанкер для всех 4 источников данных"""
+    """Unified hierarchical chunker for all knowledge base collections."""
 
     @staticmethod
     def chunk_legal_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг нормативной базы (ГК РФ / НК РФ).
-        Читает из единого JSONL файла: data/legal/laws_gk_nk.jsonl
-        с поддержкой префиксов tax_{id} (НК РФ) и civics_{id} (ГК РФ).
+        Chunk regulatory codes (Civil Code, Tax Code, Administrative Code, federal laws).
+        Reads from data/legal/legal_chapters.jsonl or data/legal/laws_gk_nk.jsonl.
         """
         child_chunks = []
         parent_store = {}
 
-        # 1. Чтение из структурированного файла по статьям и главам (LEGAL_CHAPTERS_FILE)
+        # 1. Read structured chapter/article JSONL (LEGAL_CHAPTERS_FILE)
         target_file = LEGAL_CHAPTERS_FILE if LEGAL_CHAPTERS_FILE.exists() else LEGAL_JSONL_FILE
         if target_file.exists():
             try:
@@ -149,7 +148,7 @@ class RAGChunker:
                             collected_at = doc.get("collected_at", "")
                             body = doc.get("body", doc.get("full_text", ""))
 
-                            # Сохраняем родительский документ со всеми реквизитами
+                            # Store full parent document with all metadata
                             parent_store[parent_id] = {
                                 "parent_id": parent_id,
                                 "doc_id": parent_id,
@@ -169,7 +168,7 @@ class RAGChunker:
                                 "full_text": body
                             }
 
-                            # Чанкинг по статьям (целиком статья или до 400 символов при больших объемах)
+                            # Chunk by article (keep whole article or split up to 400 chars)
                             clauses = split_article_into_chunks(body, max_chars=400, min_chars=80)
                             for idx, clause in enumerate(clauses):
                                 chunk_id = f"{parent_id}_c{idx}"
@@ -200,7 +199,7 @@ class RAGChunker:
             except Exception:
                 pass
 
-        # 2. Резервный поиск в .md файлах, если JSONL не найден
+        # 2. Fallback to Markdown files if JSONL is unavailable
         if not parent_store and LEGAL_DIR.exists():
             for file_path in LEGAL_DIR.glob("*.md"):
                 try:
@@ -269,11 +268,11 @@ class RAGChunker:
     @staticmethod
     def chunk_court_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг судебной практики ВС РФ с фильтрацией бюрократического шума:
-        1. Удаление «шапок» судов, ФИО судей/секретарей и процедурного протокола.
-        2. Отсечение непрофильных сфер права (чисто земельные споры по ЗК РФ, жилье, уголовные дела).
-        3. Вырезка только мотивировочных и резолютивных частей (правовые позиции коллегий).
-        4. Добавление тегов категорий в метаданные ChromaDB для точечного поиска.
+        Chunk Supreme Court rulings while filtering out procedural boilerplate:
+        1. Strip court headers, judge/clerk names, and procedural records.
+        2. Exclude off-topic disputes (pure land, housing, family disputes without vehicle context).
+        3. Keep reasoning and operative holdings.
+        4. Tag chunks with domain categories for metadata filtering.
         """
         child_chunks = []
         parent_store = {}
@@ -282,7 +281,7 @@ class RAGChunker:
         if not court_file.exists():
             return child_chunks, parent_store
 
-        # Регулярные выражения процедурного шума
+        # Procedural boilerplate patterns to discard
         procedural_noise_pattern = re.compile(
             r'^(?:'
             r'в\s+составе\s+председательствующ|'
@@ -318,7 +317,7 @@ class RAGChunker:
             re.IGNORECASE
         )
 
-        # Ключевые маркеры мотивировочной части (суть правовой позиции суда)
+        # Key markers of legal reasoning and judicial holdings
         motivational_markers = [
             "суд указал", "коллегия пришла к выводу", "коллегия полагает", "коллегия находит",
             "по смыслу", "в силу статьи", "в силу положений", "в соответствии со стать",
@@ -369,7 +368,7 @@ class RAGChunker:
                     "full_text": content
                 }
 
-                # Разбиение на смысловые пункты с отсечением бюрократического шума
+                # Split into semantic clauses while filtering procedural noise
                 raw_clauses = split_text_into_clauses(content, max_chars=480, min_chars=90)
                 kept_idx = 0
 
@@ -378,15 +377,15 @@ class RAGChunker:
                     if len(clause_clean) < 80:
                         continue
 
-                    # 1. Отсекаем «шапки» и процессуальный шум
+                    # 1. Strip headers and procedural boilerplate
                     if procedural_noise_pattern.search(clause_clean):
                         continue
 
-                    # 2. Отсекаем непрофильные споры (земля / долевое жилье без авто/лизинга)
+                    # 2. Drop off-topic land/housing disputes unrelated to vehicles or leasing
                     if irrelevant_land_or_housing_pattern.search(clause_clean) and not automotive_or_movable_pattern.search(clause_clean):
                         continue
 
-                    # 3. Проверяем мотивировочную / смысловую ценность
+                    # 3. Check for substantive legal reasoning
                     clause_lower = clause_clean.lower()
                     has_motivational = any(m in clause_lower for m in motivational_markers)
                     is_procedural_history_only = (
@@ -396,7 +395,7 @@ class RAGChunker:
                     if is_procedural_history_only:
                         continue
 
-                    # 4. Если абзац содержит правовую позицию или вывод суда — сохраняем с категорией
+                    # 4. Keep clauses containing legal holdings or vehicle/leasing context
                     if has_motivational or automotive_or_movable_pattern.search(clause_clean):
                         cat_tag = get_category_tag(clause_clean)
                         chunk_id = f"{parent_id}_c{kept_idx}"
@@ -415,24 +414,23 @@ class RAGChunker:
                                 "category": cat_tag,
                                 "category_tag": cat_tag,
                                 "doc_type": "court_decision",
-                                "priority_level": "high",  # Практика ВС РФ имеет высокий авторитет
+                                "priority_level": "high",  # Supreme Court rulings carry high authority
                                 "chunk_index": kept_idx
                             }
                         })
                         kept_idx += 1
 
         except Exception as e:
-            logger.error(f"Ошибка при чанкинге судебных актов ВС РФ: {e}")
+            logger.error(f"Error chunking Supreme Court rulings: {e}")
 
         return child_chunks, parent_store
 
     @staticmethod
     def chunk_cars_catalog() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг каталога автомобилей raskatof.ru.
-        Поддерживает как schema с 'model', так и 'title'/'name',
-        'specifications' и 'specs', 'leasing_terms' (dict или str).
-        Каждая карточка авто является неделимым атомарным чанком.
+        Chunk vehicle catalog from raskatof.ru.
+        Supports schemas with 'model' or 'title'/'name', 'specifications' or 'specs',
+        and 'leasing_terms' (dict or str). Each car card is kept as an atomic chunk.
         """
         child_chunks = []
         parent_store = {}
@@ -447,11 +445,11 @@ class RAGChunker:
 
             for idx, car in enumerate(cars):
                 parent_id = f"car_{idx}"
-                # Совместимость по названию модели (cars_raskatof.json: model, другие: title/name)
+                # Normalize model name across schema variants
                 model_name = car.get("model") or car.get("title") or car.get("name") or f"Автомобиль #{idx}"
                 category = car.get("category", "Эконом и комфорт класс")
 
-                # Обработка условий лизинга / раската
+                # Parse leasing/rental terms
                 terms = car.get("leasing_terms") or car.get("leasing_info") or {}
                 if isinstance(terms, dict):
                     daily = terms.get("daily_rate") or terms.get("daily") or terms.get("rate") or terms.get("terms_text") or "По запросу"
@@ -463,7 +461,7 @@ class RAGChunker:
                     daily = str(car.get("daily_rate", "По запросу"))
                     initial = str(car.get("initial_payment", "Без первого взноса"))
 
-                # Характеристики: specifications или specs
+                # Vehicle specifications
                 specs = car.get("specifications") or car.get("specs") or {}
                 if isinstance(specs, dict):
                     specs_str = ", ".join([f"{k}: {v}" for k, v in specs.items()])
@@ -472,7 +470,7 @@ class RAGChunker:
                 else:
                     specs_str = str(specs)
 
-                # Комплектация и опции: features или options
+                # Trim features and options
                 features = car.get("features") or car.get("options") or []
                 if isinstance(features, list):
                     features_str = "; ".join(features) if features else "стандартная комплектация"
@@ -537,15 +535,14 @@ class RAGChunker:
     @staticmethod
     def chunk_pdd_rules() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         """
-        Чанкинг Правил дорожного движения РФ (ПДД РФ).
-        Читает структурированные главы (Главы 1–26, Основные положения по допуску ТС,
-        Перечень неисправностей) из data/pdd/pdd_chapters.jsonl.
-        Каждый смысловой пункт/абзац формирует точный поисковый чанк.
+        Chunk Russian Traffic Rules (PDD RF).
+        Reads structured chapters (Chapters 1-26, vehicle admission rules, fault list)
+        from data/pdd/pdd_chapters.jsonl, splitting paragraphs into retrieval chunks.
         """
         child_chunks = []
         parent_store = {}
 
-        # 1. Чтение из структурированного JSONL по главам
+        # 1. Read structured chapter JSONL
         if PDD_CHAPTERS_FILE.exists():
             try:
                 with open(PDD_CHAPTERS_FILE, "r", encoding="utf-8") as f:
@@ -607,7 +604,7 @@ class RAGChunker:
             except Exception:
                 pass
 
-        # 2. Резервное чтение из pdd_rules_rag.json при необходимости
+        # 2. Fallback to legacy pdd_rules_rag.json if JSONL is absent
         if not parent_store and PDD_RULES_FILE.exists():
             try:
                 with open(PDD_RULES_FILE, "r", encoding="utf-8") as f:
@@ -660,9 +657,7 @@ class RAGChunker:
 
     @staticmethod
     def chunk_news_docs() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-        """
-        Чанкинг автомобильных новостей.
-        """
+        """Chunk automotive news articles."""
         child_chunks = []
         parent_store = {}
 

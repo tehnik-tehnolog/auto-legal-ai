@@ -24,28 +24,28 @@ from config.settings import COURT_DIR, USER_AGENT, VSRF_KEYWORD, VSRF_URL, VSRF_
 
 
 def clean_extracted_text(text: str) -> str:
-    """Очистка судебного текста от переносов строк, артефактов OCR и пробелов"""
+    """Clean extracted judicial text from line breaks, OCR artifacts, and extra whitespace."""
     if not text:
         return ""
-    # Соединяем разорванные дефисом слова
+    # Rejoin hyphenated line-break words
     text = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
-    # Заменяем одиночные переносы строк на пробелы, сохраняя абзацы
+    # Collapse single newlines into spaces while keeping paragraph breaks
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
 
 
 def extract_case_metadata(title: str) -> Dict[str, str]:
-    """Извлечение номера дела и даты из заголовка постановления ВС РФ"""
+    """Extract case number and ruling date from Supreme Court decision title."""
     case_num = ""
     date_str = ""
 
-    # Поиск номера дела вида № 5-КГ23-12-К2 или Дело № А40-...
+    # Match case number such as № 5-КГ23-12-К2 or Дело № А40-...
     num_match = re.search(r"[№N]\s*([0-9А-ЯA-Z\-КГ]+)", title, re.IGNORECASE)
     if num_match:
         case_num = num_match.group(1).strip()
 
-    # Поиск даты вида 15.03.2023 или 15 марта 2023 г.
+    # Match date in DD.MM.YYYY format
     date_match = re.search(r"(\d{1,2}\.\d{1,2}\.\d{4})", title)
     if date_match:
         date_str = date_match.group(1)
@@ -58,10 +58,10 @@ def extract_case_metadata(title: str) -> Dict[str, str]:
 
 class VSRFCourtCollector(BaseCollector):
     """
-    Коллектор практики Верховного Суда РФ по спорам с автомобилями.
-    Объединяет поиск на vsrf.ru и потоковое извлечение текста из PDF в единый пайплайн.
-    Регламент запуска: Раз в месяц.
-    Формат: vsrf_court_docs_rag.json (page_content + metadata с датой и номером дела).
+    Collector for Supreme Court of the Russian Federation rulings on automotive/leasing disputes.
+    Combines vsrf.ru search and streaming PDF extraction into a single pipeline.
+    Schedule: Monthly.
+    Output format: vsrf_court_docs_rag.json (page_content + metadata).
     """
 
     def __init__(self):
@@ -71,7 +71,7 @@ class VSRFCourtCollector(BaseCollector):
         self.session.headers.update({"User-Agent": USER_AGENT})
 
     def download_and_extract_pdf(self, url: str, retries: int = 3) -> str:
-        """Скачивание PDF в память и извлечение текста"""
+        """Download PDF into memory and extract plain text."""
         for attempt in range(1, retries + 1):
             try:
                 resp = self.session.get(url, timeout=35)
@@ -100,7 +100,7 @@ class VSRFCourtCollector(BaseCollector):
     async def collect(self) -> Dict[str, Any]:
         self.logger.info("Поиск судебных актов на портале Верховного Суда РФ...")
 
-        # Загружаем существующие документы для инкрементального обновления
+        # Load existing documents for incremental updates
         existing_docs: List[Dict[str, Any]] = []
         known_urls = set()
 
@@ -116,7 +116,7 @@ class VSRFCourtCollector(BaseCollector):
         found_links = []
 
         async with async_playwright() as p:
-            # На сервере строго headless=True
+            # Always run headless in server/container environments
             browser = await p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
@@ -128,13 +128,13 @@ class VSRFCourtCollector(BaseCollector):
                 self.logger.info(f"Переход на страницу поиска: {VSRF_URL}")
                 await page.goto(VSRF_URL, wait_until="networkidle", timeout=45000)
 
-                # Ввод поискового слова
+                # Enter search keyword
                 input_selector = "input#documents-form-keyword"
                 await page.wait_for_selector(input_selector, timeout=15000)
                 await page.click(input_selector)
                 await page.fill(input_selector, VSRF_KEYWORD)
 
-                # Установка фильтра по годам
+                # Apply year checkboxes
                 self.logger.info(f"Установка фильтров по годам: {', '.join(VSRF_YEARS)}")
                 for year in VSRF_YEARS:
                     checkbox_selector = f"button#checkbox-{year}"
@@ -148,12 +148,12 @@ class VSRFCourtCollector(BaseCollector):
                     except Exception as chk_err:
                         self.logger.debug(f"Чекбокс {year} пропущен: {chk_err}")
 
-                # Отправка формы поиска
+                # Submit search form
                 submit_btn = "button[type='submit'][form='documents-form']"
                 await page.click(submit_btn)
                 await page.wait_for_timeout(4000)
 
-                # Подгрузка всех результатов (пагинация / бесконечный список)
+                # Paginate / load more results
                 max_loads = 15
                 loads_count = 0
                 while loads_count < max_loads:
@@ -168,7 +168,7 @@ class VSRFCourtCollector(BaseCollector):
                     except Exception:
                         break
 
-                # Извлечение всех ссылок на PDF
+                # Collect all candidate PDF links
                 all_links = await page.locator("a[href]").all()
                 self.logger.info(f"Найдено ссылок на странице: {len(all_links)}")
 
@@ -190,11 +190,11 @@ class VSRFCourtCollector(BaseCollector):
             finally:
                 await browser.close()
 
-        # Дедупликация ссылок
+        # Deduplicate links by URL
         unique_links = list({item["url"]: item for item in found_links}.values())
         self.logger.info(f"Найдено уникальных актов ВС РФ: {len(unique_links)}")
 
-        # Загрузка и парсинг текста PDF
+        # Download and parse PDF contents
         newly_processed = 0
         final_rag_documents = list(existing_docs)
 
@@ -231,10 +231,10 @@ class VSRFCourtCollector(BaseCollector):
             else:
                 self.logger.warning(f"   [-] Пропущен документ {url}")
 
-            # Вежливая пауза
+            # Polite request delay
             time.sleep(1.2)
 
-        # Сохранение итогового файла
+        # Save final RAG JSON file
         with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(final_rag_documents, f, ensure_ascii=False, indent=2)
 

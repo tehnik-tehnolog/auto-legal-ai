@@ -13,5 +13,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    # Для разового запуска конкретного коллектора:
+    # Run a single collector on demand:
     # docker compose run --rm rag-collector python runner.py --collector cars

@@ -1,9 +1,9 @@
 """
-Генератор ответов RAG на базе Gemini 3.1 Flash Lite и двухэтапного конвейера поиска:
-1. Вызов Gemini для формулирования 2-6 поисковых тем по вопросу юриста.
-2. Сбор ~40 статей по этим темам + реранкинг (отбор 5 лучших статей).
-3. Объединение с 5 фрагментами стандартного отбора = ИТОГО 10 первоисточников.
-4. Вызов Gemini (или детерминированный фоллбэк) с детальным логированием.
+RAG Answer Generator powered by Gemini 3.1 Flash Lite and a two-stage retrieval pipeline:
+1. Invoke Gemini to extract 2-6 search topics from the legal query.
+2. Collect ~40 candidate articles across those topics + rerank (select top 5 articles).
+3. Merge with 5 standard retrieval chunks = TOTAL 10 primary sources.
+4. Call Gemini (or deterministic fallback) with detailed diagnostics logging.
 """
 
 import json
@@ -28,7 +28,7 @@ from rag_pipeline.config import (
 from rag_pipeline.retriever import HybridRetriever
 from rag_pipeline.promts import (SYSTEM_PROMPT, TOPIC_PROMPT)
 
-# Настройка специализированного логгера для Gemini и конвейера
+# Configure dedicated file logger for Gemini and the RAG pipeline
 logger = logging.getLogger("rag_generator")
 logger.setLevel(logging.INFO)
 
@@ -40,7 +40,7 @@ _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
 logger.addHandler(_fh)
 
 def _log_gemini_error(event_type: str, query: str, reason: str, details: str = "", tb: str = ""):
-    """Запись подробного отчета об ошибке в logs/gemini_connection.log"""
+    """Write a detailed error report to logs/gemini_connection.log."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = (
         f"\n{'=' * 80}\n"
@@ -63,7 +63,7 @@ def _log_gemini_error(event_type: str, query: str, reason: str, details: str = "
 
 
 class RAGAssistant:
-    """Полный конвейер RAG с двухэтапным тематическим отбором (10 статей) и генерацией"""
+    """End-to-end RAG pipeline with two-stage topic expansion (10 sources) and answer generation."""
 
     def __init__(self):
         self.retriever = HybridRetriever()
@@ -72,7 +72,7 @@ class RAGAssistant:
         self._init_gemini()
 
     def _init_gemini(self):
-        """Инициализация клиента Google GenAI с детальной диагностикой"""
+        """Initialize the Google GenAI client with detailed diagnostics."""
         api_key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
         if not api_key:
             self.init_error = "GEMINI_API_KEY не задан в переменных окружения или файле .env"
@@ -95,11 +95,9 @@ class RAGAssistant:
 
     def extract_topics(self, query: str, client: Optional[Any] = None) -> tuple[List[str], bool]:
         """
-        Этап 1 двухэтапного конвейера: отправляет промпт юриста модели Gemini
-        с задачей выделить от 2 до 6 ключевых тем/поисковых подзапросов по вопросу.
-        Возвращает (topics, gemini_connected).
-        Если не вышло подключиться к Gemini API — возвращает ([], False),
-        чтобы сценарий ограничился только 5 стандартными фрагментами.
+        Stage 1 of the two-stage pipeline: ask Gemini to extract 2-6 key topics/subqueries.
+        Returns (topics, gemini_connected).
+        If connecting to the Gemini API fails, returns ([], False) so retrieval is capped at 5 standard chunks.
         """
         active_client = client or self.client
         if not active_client:
@@ -119,7 +117,7 @@ class RAGAssistant:
                 cleaned = [str(t).strip() for t in topics[:6] if str(t).strip()] if isinstance(topics, list) else []
                 if len(cleaned) >= 2:
                     return cleaned, True
-            # Подключение к Gemini состоялось, но тем меньше 2 — считаем Gemini доступным
+            # Gemini connected successfully, even if fewer than 2 topics were returned
             return [], True
         except Exception as e:
             logger.warning(f"Не удалось подключиться к Gemini API на этапе выделения тем ({e}). Используем только 5 базовых фрагментов.")
@@ -133,17 +131,17 @@ class RAGAssistant:
         client: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
-        Двухэтапный сбор контекста:
-        - При доступном Gemini API: 5 стандартных фрагментов + 5 лучших статей из тематического поиска (~40 кандидатов) = ИТОГО 10.
-        - Если не вышло подключиться к Gemini API: ТОЛЬКО 5 стандартных фрагментов.
+        Two-stage context assembly:
+        - When Gemini API is available: 5 standard fragments + 5 top articles from topic expansion (~40 candidates) = 10 total.
+        - When Gemini API connection fails: ONLY 5 standard fragments.
         """
-        # Шаг 1: Стандартный сбор (5 фрагментов)
+        # Step 1: Standard retrieval (5 fragments)
         standard_res = self.retriever.retrieve(query, top_k=5)
         standard_sources = standard_res.get("sources", [])[:5]
         standard_parent_ids = {s.get("parent_id") for s in standard_sources if s.get("parent_id")}
         standard_chunk_ids = {s.get("chunk_id") for s in standard_sources if s.get("chunk_id")}
 
-        # Маркируем стандартные источники и обновляем внутренние URL для просмотра в Streamlit
+        # Tag standard sources and set internal viewer URLs for the web UI
         for s in standard_sources:
             s["source_tag"] = "standard_retrieval"
             if s.get("parent_id") and s.get("collection") == COLLECTION_LAWS:
@@ -151,13 +149,13 @@ class RAGAssistant:
             elif s.get("parent_id") and s.get("collection") == COLLECTION_PDD:
                 s["url"] = f"?pdd={s['parent_id']}#doc-pdd_{s['parent_id']}"
 
-        # Шаг 2: Выделение 2-6 тем через Gemini
+        # Step 2: Extract 2-6 search topics via Gemini
         topics, gemini_connected = self.extract_topics(query, client=client or self.client)
         logger.info(f"Gemini connected={gemini_connected} | Темы по вопросу: {topics}")
 
         topic_sources: List[Dict[str, Any]] = []
 
-        # Если подключение к Gemini API успешно и выделены темы — расширяем пул до 10 источников
+        # If Gemini API succeeded and topics were extracted, expand pool to 10 sources
         if gemini_connected and topics:
             topic_candidates_map: Dict[str, Dict[str, Any]] = {}
             target_colls = [COLLECTION_LAWS, COLLECTION_COURT, COLLECTION_PDD]
@@ -266,12 +264,12 @@ class RAGAssistant:
                         })
                         seen_chunks.add(c_id)
 
-        # Объединяем источники: 10 при успешном подключении к Gemini, иначе ТОЛЬКО 5 базовых фрагментов
+        # Merge sources: 10 when Gemini is reachable, otherwise ONLY 5 baseline fragments
         final_sources = standard_sources + topic_sources
         for idx, s in enumerate(final_sources, 1):
             s["citation_id"] = idx
 
-        # Формируем блоки контекста для промпта
+        # Build context blocks for the LLM prompt
         context_blocks = []
         for s in final_sources:
             tag_label = "Базовый поиск" if s.get("source_tag") == "standard_retrieval" else "Тематическое расширение"
@@ -322,7 +320,7 @@ class RAGAssistant:
         user_prompt: str,
         client: Optional[Any] = None
     ) -> Dict[str, Any]:
-        """Отправка скомпилированного промпта в Gemini 3.1 Flash Lite"""
+        """Send the compiled prompt to Gemini 3.1 Flash Lite."""
         active_client = client or self.client
         if not active_client:
             reason = self.init_error or "Клиент Gemini не инициализирован (отсутствует GEMINI_API_KEY)"
@@ -348,7 +346,7 @@ class RAGAssistant:
             err_msg = str(gen_err)
             logger.warning(f"Ошибка вызова Gemini API ({MODEL_NAME}): {err_type} - {err_msg}")
 
-            # Резервная модель
+            # Backup model
             fallback_model = "gemini-2.5-flash"
             try:
                 logger.info(f"Попытка обращения к резервной модели {fallback_model}...")
@@ -368,7 +366,7 @@ class RAGAssistant:
         return {"answer": "", "status": "empty_response", "error": "Пустой ответ"}
 
     def answer_query(self, query: str, attached_doc_text: str = "") -> Dict[str, Any]:
-        """Полный цикл RAG: 10 статей при работе с Gemini или строго 5 базовых фрагментов при сбое подключения"""
+        """Full RAG cycle: 10 sources with Gemini or strictly 5 baseline fragments on API failure."""
         ctx_data = self.prepare_10_sources_context(query, attached_doc_text=attached_doc_text)
         sources = ctx_data["sources"]
         user_prompt = ctx_data["user_prompt"]
@@ -384,7 +382,7 @@ class RAGAssistant:
             if not fallback_reason:
                 fallback_reason = "Ответ от Gemini пуст или заблокирован фильтрами"
             _log_gemini_error("FALLBACK_ACTIVATED", query, fallback_reason)
-            # Если не удалось подключиться к Gemini API — оставляем строго 5 базовых фрагментов
+            # Keep strictly 5 baseline fragments when Gemini API cannot be reached
             sources = [s for s in sources if s.get("source_tag") == "standard_retrieval"][:5] or sources[:5]
             topics = []
             answer_text = self._extractive_fallback_generation(query, sources, reason=fallback_reason)
@@ -409,7 +407,7 @@ class RAGAssistant:
         List[Dict[str, Any]],
         reason: Optional[str] = None
     ) -> str:
-        """Локальный генератор на случай отсутствия API-ключа Gemini или сетевых сбоев"""
+        """Extractive fallback generator when Gemini API key is missing or network fails."""
         parts = [
             "**Ответ RAG-ассистента по базе знаний компании (сформирован локально по первоисточникам):**\n"
         ]

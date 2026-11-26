@@ -89,7 +89,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
           </div>
         ) : (
           <>
-            {/* Сводка режима RAG без пилюль */}
+            {/* RAG retrieval mode summary */}
             <div className="pb-4 border-b border-[#E2E8F0] dark:border-[#1E293B] space-y-2.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-medium text-slate-600 dark:text-slate-300">
@@ -137,7 +137,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
               )}
             </div>
 
-            {/* Список первоисточников */}
+            {/* Primary sources list */}
             <div className="divide-y divide-[#E2E8F0] dark:divide-[#1E293B]">
               {sources.map((src, idx) => {
                 const isExpanded = Boolean(expandedChunks[src.chunk_id]);

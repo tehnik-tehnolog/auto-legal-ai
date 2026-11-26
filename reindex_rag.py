@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Скрипт переиндексации базы данных RAG в ChromaDB с иерархическим чанкингом.
-Запуск локально:
+Re-index the RAG knowledge base (ChromaDB + BM25) with hierarchical Parent-Document chunking.
+Local usage:
     python reindex_rag.py
 """
 

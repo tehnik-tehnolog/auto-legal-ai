@@ -49,7 +49,7 @@ MEDIUM_PRIORITY_KEYWORDS = [
 
 
 def determine_priority(title: str, text: str) -> str:
-    """Определение приоритета документа для RAG в компании по раскату авто"""
+    """Determine RAG priority level for vehicle rental/leasing domain documents."""
     combined = (title + " " + text[:600]).lower()
     if any(k in combined for k in HIGH_PRIORITY_KEYWORDS):
         return "high"
@@ -59,7 +59,7 @@ def determine_priority(title: str, text: str) -> str:
 
 
 def roman_to_int(roman_str: str) -> Optional[int]:
-    """Преобразование римских цифр (I, II, III, IV...) в арабские числа"""
+    """Convert Roman numerals (I, II, III, IV...) to integers."""
     roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
     s = roman_str.upper().strip()
     if not s or not re.match(r'^[IVXLCDM]+$', s):
@@ -76,8 +76,8 @@ def roman_to_int(roman_str: str) -> Optional[int]:
 
 class LawsCollector(BaseCollector):
     """
-    Коллектор нормативно-правовой базы (ГК РФ, НК РФ, КоАП РФ, законы об авто и лизинге).
-    Разбивает законы по статьям (1 статья = 1 документ) и сохраняет в:
+    Regulatory acts collector (Civil Code, Tax Code, Administrative Code, auto/leasing statutes).
+    Splits statutes by article (1 article = 1 document) and writes to:
       - data/legal/legal_chapters.jsonl
       - data/legal/laws_gk_nk.jsonl
     """
@@ -95,17 +95,16 @@ class LawsCollector(BaseCollector):
     @staticmethod
     def clean_legal_text(text: str) -> str:
         """
-        Очистка и форматирование юридического текста статьи (как в pdd.py):
-        - Замена конструкции <*> на текст из сноски (курсивом).
-        - Устранение переносов слов через дефис.
-        - Склейка одиночных переносов строк в связные абзацы.
-        - Выделение слов в кавычках жирным шрифтом (**"..."** / **«...»**).
-        - Выделение пунктов (*1.*, *2.1.*, *1)* и т.д.) курсивом.
+        Clean and format statutory article text:
+        - Replace <*> footnote markers with italicized footnote text.
+        - Rejoin hyphenated line-break words.
+        - Merge single line breaks into coherent paragraphs.
+        - Bold quoted phrases and italicize item numbering.
         """
         if not text:
             return ""
 
-        # 1. Сноски <*>
+        # 1. Inline footnotes <*>
         footnote_pattern = r'--------------------------------\s*<\*>\s*([^\n]+)'
         match_fn = re.search(footnote_pattern, text)
         if match_fn:
@@ -115,34 +114,34 @@ class LawsCollector(BaseCollector):
 
         text = re.sub(r'-{3,}', '', text)
 
-        # 2. Переносы через дефис
+        # 2. Fix hyphenated line breaks
         text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
 
-        # 3. Одиночные переносы строк на пробелы
+        # 3. Collapse single newlines into spaces
         clean_pattern = r'(?<!\n)\n(?!\n|\s*["\'«„]|\s*[А-ЯЁA-Z]|\s*\d+(?:\.\d+)*\.?)'
         text = re.sub(clean_pattern, ' ', text)
 
-        # 4. Двойные переносы для структурных абзацев
+        # 4. Normalize structural paragraph breaks
         text = re.sub(r'\n+', '\n\n', text)
 
-        # 5. Множественные пробелы
+        # 5. Collapse repeated spaces
         text = re.sub(r'[ \t]+', ' ', text)
 
-        # 6. Слова в кавычках — жирным
+        # 6. Emphasize quoted phrases
         text = re.sub(r'"([^"]+)"', r'**"\1"**', text)
         text = re.sub(r'«([^»]+)»', r'**«\1»**', text)
 
-        # 7. Нумерация пунктов — курсивом
+        # 7. Italicize numbered items
         text = re.sub(r'(^|\n\n)(\d+\.|\d+\))', r'\1*\2*', text)
 
         return text.strip()
 
     @staticmethod
     def clean_html_to_text(html: str) -> str:
-        """Преобразование HTML акта в чистый структурированный текст"""
+        """Convert act HTML into clean structured plain text."""
         if not html:
             return ""
-        # Сохраняем заголовки h1-h6 в одну строку
+        # Keep headings h1-h6 on a single line
         html = re.sub(r'(<h[1-6][^>]*>.*?)(?:<br\s*/?>\s*)+(.*?)</h[1-6]>', r'\1 \2', html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
         html = re.sub(r'</?(?:p|div|h[1-6]|article|section)[^>]*>', '\n\n', html, flags=re.IGNORECASE)
@@ -152,7 +151,7 @@ class LawsCollector(BaseCollector):
         return '\n'.join(lines)
 
     def _fetch_law_raw_text(self, doc_url: str) -> str:
-        """Скачивание или чтение из кэша текста акта с портала docs.cntd.ru"""
+        """Fetch or read cached raw text for a legal act from docs.cntd.ru."""
         doc_id_match = re.search(r'/document/(\d+)', doc_url)
         doc_id = doc_id_match.group(1) if doc_id_match else hashlib.md5(doc_url.encode()).hexdigest()[:8]
         cache_file = self.cache_dir / f"{doc_id}.txt"
@@ -170,7 +169,7 @@ class LawsCollector(BaseCollector):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
 
-        # 1. Попытка скачивания через API blocks
+        # 1. Try fetching via API blocks
         try:
             api_url = f"https://api.docs.cntd.ru/v1/document/{doc_id}"
             api_headers = {
@@ -203,7 +202,7 @@ class LawsCollector(BaseCollector):
         except Exception as ex:
             self.logger.warning(f"API fetch fallback for {doc_id}: {ex}")
 
-        # 2. Попытка скачивания веб-страницы
+        # 2. Fallback to direct HTML page fetch
         try:
             cj = http.cookiejar.CookieJar()
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -222,16 +221,14 @@ class LawsCollector(BaseCollector):
 
     def parse_articles(self, raw_text: str, law_meta: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Разбиение текста закона на статьи (1 статья = 1 документ).
-        Связность: первое сочетание 'Глава N' формирует название и номер главы.
-        Римские цифры глав преобразуются в арабские (Глава III -> Глава 3).
-        Номера статей с нижним подчеркиванием или точками (Статья 50_1, Статья 50.1)
-        корректно обрабатываются при формировании parent_id.
+        Split statutory text into articles (1 article = 1 document).
+        Roman numeral chapter numbers are normalized to Arabic digits.
+        Sub-numbered articles (e.g. 50_1, 50.1) are preserved safely in parent_id.
         """
         if not raw_text:
             return []
 
-        # Регулярное выражение с поддержкой римских цифр глав и статей вида 50_1, 50.1, 12.31_1
+        # Match chapter headings (Roman/Arabic) and article headings (including 50_1, 50.1, 12.31_1)
         pattern = re.compile(
             r'(?P<chapter>(?:Глава|ГЛАВА)\s+(\d+|\b[IVXLCDM]+\b)\.?[ \t]*([^\n]*))|'
             r'(?P<article>(?:Статья|СТАТЬЯ)\s+(\d+(?:[._-]\d+)*)\.?[ \t]*([^\n]*))',
@@ -255,11 +252,11 @@ class LawsCollector(BaseCollector):
                     ch_num_raw = m.group(2).strip()
                     ch_title_raw = m.group(3).strip()
 
-                    # Преобразование римских цифр глав в арабские
+                    # Convert Roman chapter numerals to Arabic digits
                     r_val = roman_to_int(ch_num_raw)
                     ch_num_val = str(r_val) if r_val is not None else ch_num_raw
 
-                    # Очистка названия главы от предшествующей цифры
+                    # Strip leading chapter number from title
                     clean_title = re.sub(r'^(?:[IVXLCDM]+|\d+)\.?\s*', '', ch_title_raw).strip()
 
                     current_ch_num = f"Глава {ch_num_val}"
@@ -275,7 +272,7 @@ class LawsCollector(BaseCollector):
                     raw_body = raw_text[start_body:end_body]
                     cleaned_body = self.clean_legal_text(raw_body)
 
-                    # Формирование безопасного ID с поддержкой 50_1, 50.1
+                    # Build deterministic document ID supporting 50_1 / 50.1 articles
                     ch_num_only = current_ch_num.replace("Глава ", "")
                     safe_ch = re.sub(r'[^a-zA-Z0-9]', '_', str(ch_num_only)).strip('_')
                     safe_art = re.sub(r'[^a-zA-Z0-9]', '_', str(art_num_val)).strip('_')
@@ -368,7 +365,7 @@ class LawsCollector(BaseCollector):
             if test_mode:
                 break
 
-        # Если all_articles сформированы — сохраняем в JSONL
+        # Persist extracted articles to JSONL files
         if all_articles:
             with open(self.output_chapters, "w", encoding="utf-8") as f_ch:
                 for art in all_articles:

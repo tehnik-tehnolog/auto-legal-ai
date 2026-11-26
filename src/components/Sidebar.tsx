@@ -161,7 +161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const sidebarContent = (
     <aside className="w-[280px] h-full flex flex-col bg-white dark:bg-[#111827] border-r border-[#E2E8F0] dark:border-[#1E293B] select-none">
-      {/* Профиль пользователя */}
+      {/* User profile */}
       <div className="p-4 border-b border-[#E2E8F0] dark:border-[#1E293B]">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -201,7 +201,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* 3 Раздела */}
+      {/* Navigation sections */}
       <nav className="p-3 space-y-1 border-b border-[#E2E8F0] dark:border-[#1E293B]" aria-label="Разделы">
         {navItems.map((item) => {
           const active = activeNav === item.id;
@@ -230,7 +230,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })}
       </nav>
 
-      {/* Темы чатов */}
+      {/* Chat threads */}
       <div className="flex-1 min-h-0 flex flex-col">
         <div className="flex items-center justify-between px-4 pt-3.5 pb-2">
           <h2 className="text-xs font-semibold tracking-wide text-slate-500 dark:text-slate-400">
@@ -273,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* Спокойный статистический футер базы знаний без пилюль */}
+      {/* Knowledge base stats footer */}
       <div className="px-4 py-3 border-t border-[#E2E8F0] dark:border-[#1E293B] text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
         {stats ? (
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 leading-relaxed">

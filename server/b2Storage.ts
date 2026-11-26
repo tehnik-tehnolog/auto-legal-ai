@@ -6,6 +6,7 @@ import {
   GetObjectCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
+  type _Object,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
@@ -18,6 +19,19 @@ import {
 } from './config';
 
 const KB_SUBDIRS = ['legal', 'pdd', 'court', 'news', 'cars', 'chroma'];
+
+export interface B2SyncStatus {
+  configured: boolean;
+  bucket: string | null;
+  dataDir: string;
+  prefixUsed: string | null;
+  found: number;
+  downloaded: number;
+  skipped: number;
+  errors: number;
+  lastError: string | null;
+  lastSyncAt: string | null;
+}
 
 function collectFilesRecursively(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
@@ -44,12 +58,38 @@ function guessContentType(filePath: string): string {
   return 'application/octet-stream';
 }
 
+function normalizeKbRelativePath(rawKey: string): string {
+  let rel = rawKey.replace(/^\/+/, '');
+  if (rel.startsWith('kb/')) {
+    rel = rel.slice('kb/'.length);
+  } else if (rel.startsWith('data/')) {
+    rel = rel.slice('data/'.length);
+  }
+  return rel.replace(/^\/+/, '');
+}
+
 class B2StorageService {
   private client: S3Client | null = null;
   private resolvedBucket: string | null = null;
+  private lastSyncStatus: B2SyncStatus = {
+    configured: false,
+    bucket: null,
+    dataDir: DATA_DIR,
+    prefixUsed: null,
+    found: 0,
+    downloaded: 0,
+    skipped: 0,
+    errors: 0,
+    lastError: null,
+    lastSyncAt: null,
+  };
 
   isConfigured(): boolean {
     return Boolean(B2_ENDPOINT && B2_KEY_ID && B2_APPLICATION_KEY);
+  }
+
+  getSyncStatus(): B2SyncStatus {
+    return { ...this.lastSyncStatus, configured: this.isConfigured(), dataDir: DATA_DIR };
   }
 
   private getClient(): S3Client | null {
@@ -64,6 +104,8 @@ class B2StorageService {
         secretAccessKey: B2_APPLICATION_KEY,
       },
       forcePathStyle: true,
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
     });
     return this.client;
   }
@@ -80,8 +122,11 @@ class B2StorageService {
         this.resolvedBucket = first;
         return first;
       }
+      this.lastSyncStatus.lastError = 'No buckets returned by Backblaze B2 ListBuckets.';
     } catch (err) {
-      console.warn('[B2] Unable to list buckets:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastSyncStatus.lastError = `ListBuckets failed (${msg}). Set B2_BUCKET_NAME explicitly for bucket-restricted keys.`;
+      console.warn(`[B2] Unable to list buckets (${msg}). Set B2_BUCKET_NAME explicitly if using a single-bucket key.`);
     }
     return null;
   }
@@ -135,39 +180,117 @@ class B2StorageService {
     }
   }
 
+  private async listObjectsByPrefix(
+    client: S3Client,
+    bucket: string,
+    prefix: string
+  ): Promise<_Object[]> {
+    const items: _Object[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const listResp = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        })
+      );
+      for (const obj of listResp.Contents || []) {
+        items.push(obj);
+      }
+      continuationToken = listResp.NextContinuationToken;
+    } while (continuationToken);
+    return items;
+  }
+
   async syncKbFromB2(
     targetDir = DATA_DIR
-  ): Promise<{ configured: boolean; downloaded: number; skipped: number }> {
-    const summary = { configured: this.isConfigured(), downloaded: 0, skipped: 0 };
-    if (!this.isConfigured()) return summary;
+  ): Promise<{ configured: boolean; downloaded: number; skipped: number; errors: number }> {
+    const summary = { configured: this.isConfigured(), downloaded: 0, skipped: 0, errors: 0 };
+    this.lastSyncStatus = {
+      configured: this.isConfigured(),
+      bucket: B2_BUCKET_NAME || this.resolvedBucket,
+      dataDir: targetDir,
+      prefixUsed: null,
+      found: 0,
+      downloaded: 0,
+      skipped: 0,
+      errors: 0,
+      lastError: null,
+      lastSyncAt: new Date().toISOString(),
+    };
+
+    if (!this.isConfigured()) {
+      this.lastSyncStatus.lastError = 'Backblaze B2 credentials are not configured.';
+      return summary;
+    }
 
     const client = this.getClient();
     const bucket = await this.getBucketName();
-    if (!client || !bucket) return summary;
+    if (!client || !bucket) {
+      summary.errors += 1;
+      this.lastSyncStatus.errors = summary.errors;
+      return summary;
+    }
+
+    this.lastSyncStatus.bucket = bucket;
+    console.log(
+      `[B2] Syncing KB into "${targetDir}" from bucket "${bucket}" (endpoint=${B2_ENDPOINT}, region=${B2_REGION})...`
+    );
 
     try {
-      let continuationToken: string | undefined;
-      do {
-        const listResp = await client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: 'kb/',
-            ContinuationToken: continuationToken,
-          })
-        );
+      // Support multiple bucket layouts: kb/<sub/...>, data/<sub/...>, or root <sub/...>
+      let objects: _Object[] = await this.listObjectsByPrefix(client, bucket, 'kb/');
+      let prefixUsed = 'kb/';
 
-        for (const obj of listResp.Contents || []) {
-          const key = obj.Key;
-          if (!key) continue;
-          const relPath = key.replace(/^kb\//, '').replace(/^\/+/, '');
-          if (!relPath || relPath.endsWith('/')) continue;
+      if (objects.length === 0) {
+        const dataObjects = await this.listObjectsByPrefix(client, bucket, 'data/');
+        if (dataObjects.length > 0) {
+          objects = dataObjects;
+          prefixUsed = 'data/';
+        }
+      }
 
-          const localPath = path.join(targetDir, relPath);
-          if (fs.existsSync(localPath) && fs.statSync(localPath).size === obj.Size) {
-            summary.skipped += 1;
-            continue;
-          }
+      if (objects.length === 0) {
+        const rootObjects: _Object[] = [];
+        for (const sub of KB_SUBDIRS) {
+          const subObjs = await this.listObjectsByPrefix(client, bucket, `${sub}/`);
+          rootObjects.push(...subObjs);
+        }
+        if (rootObjects.length > 0) {
+          objects = rootObjects;
+          prefixUsed = 'root';
+        }
+      }
 
+      this.lastSyncStatus.prefixUsed = prefixUsed;
+      this.lastSyncStatus.found = objects.length;
+
+      if (objects.length === 0) {
+        const msg = `No KB objects found in bucket "${bucket}" under prefixes "kb/", "data/", or root (${KB_SUBDIRS.join(', ')}).`;
+        console.warn(`[B2] ${msg}`);
+        this.lastSyncStatus.lastError = msg;
+        return summary;
+      }
+
+      for (const obj of objects) {
+        const key = obj.Key;
+        if (!key || key.endsWith('/')) continue;
+
+        const relPath = normalizeKbRelativePath(key);
+        if (!relPath) continue;
+        // Skip cache directories and non-KB prefixes
+        const topDir = relPath.split('/')[0];
+        if (!KB_SUBDIRS.includes(topDir)) continue;
+        if (relPath.includes('/cache/') || relPath.startsWith('cache/')) continue;
+
+        const localPath = path.join(targetDir, relPath);
+        if (fs.existsSync(localPath) && fs.statSync(localPath).size === obj.Size) {
+          summary.skipped += 1;
+          continue;
+        }
+
+        try {
           fs.mkdirSync(path.dirname(localPath), { recursive: true });
           const getResp = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
           if (getResp.Body) {
@@ -178,11 +301,26 @@ class B2StorageService {
             fs.writeFileSync(localPath, Buffer.concat(chunks));
             summary.downloaded += 1;
           }
+        } catch (fileErr) {
+          summary.errors += 1;
+          const msg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+          this.lastSyncStatus.lastError = `Failed downloading ${key}: ${msg}`;
+          console.error(`[B2] Failed downloading ${key} -> ${localPath}:`, fileErr);
         }
-        continuationToken = listResp.NextContinuationToken;
-      } while (continuationToken);
+      }
+
+      this.lastSyncStatus.downloaded = summary.downloaded;
+      this.lastSyncStatus.skipped = summary.skipped;
+      this.lastSyncStatus.errors = summary.errors;
+      console.log(
+        `[B2] Sync complete (prefix="${prefixUsed}", found=${objects.length}, downloaded=${summary.downloaded}, skipped=${summary.skipped}, errors=${summary.errors}).`
+      );
     } catch (err) {
-      console.warn('[B2] KB sync warning:', err);
+      summary.errors += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastSyncStatus.errors = summary.errors;
+      this.lastSyncStatus.lastError = msg;
+      console.error('[B2] KB sync failed:', err);
     }
     return summary;
   }
@@ -200,22 +338,12 @@ class B2StorageService {
     // Fetch existing sizes in kb/ to avoid redundant uploads
     const remoteSizes = new Map<string, number>();
     try {
-      let continuationToken: string | undefined;
-      do {
-        const listResp = await client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: 'kb/',
-            ContinuationToken: continuationToken,
-          })
-        );
-        for (const obj of listResp.Contents || []) {
-          if (obj.Key && typeof obj.Size === 'number') {
-            remoteSizes.set(obj.Key, obj.Size);
-          }
+      const existing = await this.listObjectsByPrefix(client, bucket, 'kb/');
+      for (const obj of existing) {
+        if (obj.Key && typeof obj.Size === 'number') {
+          remoteSizes.set(obj.Key, obj.Size);
         }
-        continuationToken = listResp.NextContinuationToken;
-      } while (continuationToken);
+      }
     } catch (err) {
       console.warn('[B2] Unable to inspect remote kb/ objects:', err);
     }

@@ -85,18 +85,32 @@ export default function App() {
     }
     void bootstrap();
 
+    let statsRetryTimer: number | undefined;
     apiFetch<KBStats>('/api/kb/stats')
       .then((data) => {
-        if (!cancelled) setStats(data);
+        if (!cancelled) {
+          setStats(data);
+          // If B2 hydration on container startup is still in progress, re-fetch stats once
+          if (data.legal === 0) {
+            statsRetryTimer = window.setTimeout(() => {
+              apiFetch<KBStats>('/api/kb/stats')
+                .then((next) => {
+                  if (!cancelled) setStats(next);
+                })
+                .catch(() => {});
+            }, 4000);
+          }
+        }
       })
       .catch(() => {});
 
     return () => {
       cancelled = true;
+      if (statsRetryTimer) window.clearTimeout(statsRetryTimer);
     };
   }, []);
 
-  // Keep Render warm when tab regains visibility
+  // Refresh health status when tab regains visibility
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {

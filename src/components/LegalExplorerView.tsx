@@ -193,7 +193,7 @@ export const LegalExplorerView: React.FC<LegalExplorerViewProps> = ({
 
       <div className="flex-1 overflow-y-auto px-4 lg:px-8 py-6">
         <div className="max-w-5xl mx-auto space-y-5">
-          {/* Фильтры */}
+          {/* Filters */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3 bg-white dark:bg-[#111827] border border-[#E2E8F0] dark:border-[#1E293B] rounded-xl p-4">
             <div className="md:col-span-3">
               <label className="block text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">

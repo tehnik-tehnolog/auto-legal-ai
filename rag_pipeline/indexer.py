@@ -1,6 +1,6 @@
 """
-Индексатор ChromaDB с поддержкой раздельных коллекций и хранилища родительских документов.
-Обеспечивает детальный консольный вывод процесса индексации и логирование.
+ChromaDB & BM25 indexer supporting separate domain collections and a ParentDocument store.
+Provides detailed console progress output and file logging.
 """
 
 import json
@@ -23,7 +23,6 @@ from rag_pipeline.config import (
     COLLECTION_PDD,
     EMBEDDING_MODEL,
     ENABLE_CHROMA,
-    IS_RENDER,
     LEGAL_JSONL_FILE,
     LOGS_DIR,
     MODEL_NAME,
@@ -50,7 +49,7 @@ _LEMMA_CACHE: Dict[str, str] = {}
 
 
 def lemmatize_word(word: str) -> str:
-    """Нормализация слова в базовую лемму с использованием pymorphy3 и быстрым кэшированием"""
+    """Normalize a word into its base lemma using pymorphy3 with fast in-memory caching."""
     if not _morph_analyzer:
         return word.lower()
     w_lower = word.lower()
@@ -69,16 +68,15 @@ def lemmatize_word(word: str) -> str:
 
 def lemmatize_text(text: str) -> List[str]:
     """
-    Токенизация и лемматизация текста для BM25 и гибридного поиска:
-    'транспортного налога' -> ['транспортный', 'налог']
-    'гражданской ответственности' -> ['гражданский', 'ответственность']
+    Tokenize and lemmatize Russian/mixed text for BM25 and hybrid retrieval
+    (reduces inflected Russian word forms to canonical lemmas).
     """
     tokens = re.findall(r'\b[а-яА-Яa-zA-Z0-9_-]{2,}\b', text)
     return [lemmatize_word(t) for t in tokens]
 
 
 def _resolve_embedding_model_name(model_name: str) -> str:
-    """Преобразует сокращенные имена моделей эмбеддингов в корректные ID HuggingFace."""
+    """Map shorthand embedding model aliases to full HuggingFace model IDs."""
     aliases = {
         "bge-m3": "BAAI/bge-m3",
     }
@@ -88,8 +86,8 @@ def _resolve_embedding_model_name(model_name: str) -> str:
 
 class SimpleBM25Index:
     """
-    Легковесный ин-мемори лексический индекс BM25 с морфологической лемматизацией (pymorphy3).
-    Находит документы независимо от падежей, чисел и окончаний слов.
+    Lightweight in-memory BM25 lexical index with pymorphy3 morphological lemmatization.
+    Matches documents regardless of Russian grammatical case, number, or inflections.
     """
     def __init__(self):
         self.corpus: List[List[str]] = []
@@ -127,7 +125,7 @@ class SimpleBM25Index:
                 self.idf[token] = math.log(1 + (n_docs - freq + 0.5) / (freq + 0.5))
 
     def to_dict(self) -> Dict[str, Any]:
-        """Сериализация полного состояния BM25-индекса (лемматизированный корпус, IDF, чанки) в JSON."""
+        """Serialize full BM25 index state (lemmatized corpus, IDF, chunks) to JSON."""
         chunks_list = [self.docs_map[c_id] for c_id in self.doc_ids if c_id in self.docs_map]
         return {
             "doc_ids": self.doc_ids,
@@ -141,7 +139,7 @@ class SimpleBM25Index:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SimpleBM25Index":
-        """Восстановление BM25-индекса из JSON без повторной лемматизации."""
+        """Restore a BM25 index from JSON without re-lemmatizing the corpus."""
         idx = cls()
         if not isinstance(data, dict):
             return idx
@@ -173,7 +171,7 @@ class SimpleBM25Index:
                 idx.avgdl = sum(len(doc) for doc in idx.corpus) / len(idx.corpus)
             return idx
 
-        # Обратная совместимость со старым форматом bm25_indices.json (без corpus/idf)
+        # Backward compatibility with legacy bm25_indices.json format (without corpus/idf)
         if "ids" in data and "texts" in data:
             ids = data.get("ids", [])
             texts = data.get("texts", [])
@@ -218,7 +216,7 @@ class SimpleBM25Index:
 
 
 class ChromaRAGIndexer:
-    """Управление 5 коллекциями ChromaDB и родительским хранилищем с детальным логированием"""
+    """Manages 5 ChromaDB collections, BM25 indices, and the ParentDocument store."""
 
     def __init__(self):
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
@@ -231,8 +229,8 @@ class ChromaRAGIndexer:
         self._init_client()
 
     def _init_client(self):
-        if ENABLE_CHROMA == "false" or (ENABLE_CHROMA == "auto" and IS_RENDER):
-            logger.info("Режим Render Free Tier / Low-RAM: используется легкий локальный индекс BM25 + pymorphy3.")
+        if ENABLE_CHROMA == "false":
+            logger.info("Low-RAM mode (ENABLE_CHROMA=false): using lightweight local BM25 + pymorphy3 index.")
             self.client = None
             return
         try:
@@ -242,13 +240,13 @@ class ChromaRAGIndexer:
                 path=str(CHROMA_DIR),
                 settings=Settings(anonymized_telemetry=False, is_persistent=True)
             )
-            logger.info("ChromaDB PersistentClient успешно инициализирован.")
+            logger.info("ChromaDB PersistentClient initialized successfully.")
         except Exception as e:
-            logger.warning(f"ChromaDB клиент не инициализирован ({e}). Будет использован локальный индекс.")
+            logger.warning(f"ChromaDB client not initialized ({e}). Falling back to local BM25 index.")
             self.client = None
 
     def _init_embedding_function(self):
-        """Инициализация SentenceTransformerEmbeddingFunction для ChromaDB по модели EMBEDDING_MODEL."""
+        """Initialize SentenceTransformerEmbeddingFunction for ChromaDB using EMBEDDING_MODEL."""
         if self.embedding_function is not None:
             return self.embedding_function
         if self._embedding_init_attempted or self.client is None:
@@ -292,11 +290,12 @@ class ChromaRAGIndexer:
 
     def index_all(self, verbose: bool = True) -> Dict[str, Any]:
         """
-        Индексация всех 4 источников:
-        1. Законы ГК/НК РФ (из единого JSONL файла)
-        2. Судебная практика ВС РФ (из vsrf_court_docs_rag.json)
-        3. Ассортимент raskatof.ru (из cars_raskatof.json)
-        4. Автоновости (из latest_autonews.json)
+        Index all knowledge base sources:
+        1. Regulatory laws (Civil/Tax/Administrative Codes from JSONL)
+        2. Supreme Court case law (from vsrf_court_docs_rag.json)
+        3. Vehicle catalog (from cars_raskatof.json)
+        4. Automotive news (from latest_autonews.json)
+        5. Traffic rules (from pdd_chapters.jsonl)
         """
         t_start = time.time()
 
@@ -320,13 +319,13 @@ class ChromaRAGIndexer:
         }
 
         # -------------------------------------------------------------
-        # ШАГ 1: Загрузка и Parent-Document чанкинг
+        # STEP 1: Load documents and run hierarchical Parent-Document chunking
         # -------------------------------------------------------------
         if verbose:
             print("\n[ШАГ 1/4] ИЗВЛЕЧЕНИЕ ДОКУМЕНТОВ И ИЕРАРХИЧЕСКИЙ ЧАНКИНГ (Small-to-Big)")
             print("-" * 76)
 
-        # 1.1 Нормативная база
+        # 1.1 Regulatory base
         t0 = time.time()
         laws_chunks, laws_parents = RAGChunker.chunk_legal_docs()
         t_laws = time.time() - t0
@@ -342,7 +341,7 @@ class ChromaRAGIndexer:
             print(f"     • Категории в базе:    {', '.join(categories[:4])}{'...' if len(categories) > 4 else ''}")
             print(f"     • Сгенерировано чанков:{len(laws_chunks)} атомных пунктов (время: {t_laws:.2f} с)")
 
-        # 1.2 Судебная практика ВС РФ
+        # 1.2 Supreme Court case law
         t0 = time.time()
         court_chunks, court_parents = RAGChunker.chunk_court_docs()
         t_court = time.time() - t0
@@ -351,7 +350,7 @@ class ChromaRAGIndexer:
             print(f"     • Актов ВС в базе:     {len(court_parents)} шт.")
             print(f"     • Сгенерировано чанков:{len(court_chunks)} пунктов аргументации (время: {t_court:.2f} с)")
 
-        # 1.3 Каталог автомобилей
+        # 1.3 Vehicle catalog
         t0 = time.time()
         cars_chunks, cars_parents = RAGChunker.chunk_cars_catalog()
         t_cars = time.time() - t0
@@ -360,7 +359,7 @@ class ChromaRAGIndexer:
             print(f"     • Моделей авто:        {len(cars_parents)} шт.")
             print(f"     • Сгенерировано чанков:{len(cars_chunks)} карточек (время: {t_cars:.2f} с)")
 
-        # 1.4 Автоновости
+        # 1.4 Automotive news
         t0 = time.time()
         news_chunks, news_parents = RAGChunker.chunk_auto_news()
         t_news = time.time() - t0
@@ -369,7 +368,7 @@ class ChromaRAGIndexer:
             print(f"     • Новостных статей:    {len(news_parents)} шт.")
             print(f"     • Сгенерировано чанков:{len(news_chunks)} фрагментов (время: {t_news:.2f} с)")
 
-        # 1.5 Правила дорожного движения РФ (ПДД РФ)
+        # 1.5 Traffic rules (PDD)
         t0 = time.time()
         pdd_chunks, pdd_parents = RAGChunker.chunk_pdd_rules()
         t_pdd = time.time() - t0
@@ -379,7 +378,7 @@ class ChromaRAGIndexer:
             print(f"     • Сгенерировано чанков:{len(pdd_chunks)} пунктов/абзацев (время: {t_pdd:.2f} с)")
 
         # -------------------------------------------------------------
-        # ШАГ 2: Сохранение объединенного хранилища Parent-документов
+        # STEP 2: Save unified ParentDocument store
         # -------------------------------------------------------------
         if verbose:
             print("\n[ШАГ 2/4] СОХРАНЕНИЕ ХРАНИЛИЩА РОДИТЕЛЬСКИХ ДОКУМЕНТОВ (ParentStore)")
@@ -402,7 +401,7 @@ class ChromaRAGIndexer:
             print(f"     • Размер на диске:               {store_size_kb} КБ")
 
         # -------------------------------------------------------------
-        # ШАГ 3: Запись в раздельные коллекции ChromaDB
+        # STEP 3: Write to separate ChromaDB collections
         # -------------------------------------------------------------
         if verbose:
             print("\n[ШАГ 3/4] ЗАПИСЬ В 5 РАЗДЕЛЬНЫХ КОЛЛЕКЦИЙ CHROMADB")
@@ -436,7 +435,7 @@ class ChromaRAGIndexer:
                 stats["collections"][coll_name] = 0
                 continue
 
-            # Добавляем в ChromaDB при наличии клиента и embedding-функции
+            # Add chunks to ChromaDB when client is active
             if self.client:
                 try:
                     try:
@@ -477,12 +476,12 @@ class ChromaRAGIndexer:
                     if verbose:
                         print(f"    - Ошибка ChromaDB: {ex}")
 
-            # Подготовка и полная сериализация индекса BM25
+            # Build and serialize full BM25 index
             bm25 = SimpleBM25Index()
             bm25.build(chunks)
             bm25_indices_dump[coll_name] = bm25.to_dict()
 
-            # Сохранение резервного JSON с чанками
+            # Save backup chunks JSON
             chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
             with open(chunk_backup_file, "w", encoding="utf-8") as f:
                 json.dump(chunks, f, ensure_ascii=False, indent=2)
@@ -494,7 +493,7 @@ class ChromaRAGIndexer:
                 print(f"    - Готово: {c_len} чанков проиндексировано. Словарь BM25: {len(bm25.doc_freqs)} слов.")
 
         # -------------------------------------------------------------
-        # ШАГ 4: Сохранение BM25 поисковых индексов
+        # STEP 4: Persist BM25 lexical indices
         # -------------------------------------------------------------
         if verbose:
             print("\n[ШАГ 4/4] СОХРАНЕНИЕ ЛЕКСИЧЕСКИХ ИНДЕКСОВ BM25")
@@ -507,7 +506,7 @@ class ChromaRAGIndexer:
         if verbose:
             print(f"  💾 Файл: {self.bm25_store_path} (Размер: {bm25_size_kb} КБ)")
 
-        # Завершение
+        # Done
         t_total = round(time.time() - t_start, 2)
         stats["duration_sec"] = t_total
 
@@ -534,10 +533,9 @@ class ChromaRAGIndexer:
         verbose: bool = True
     ) -> Dict[str, Any]:
         """
-        Быстрая выборочная переиндексация указанных коллекций.
-        По умолчанию переиндексирует только легкие и часто обновляемые источники:
-        Каталог автомобилей (car_catalog) и Автоновости (auto_news).
-        Не затрагивает тяжелый массив нормативной базы (ГК/НК РФ) и судебной практики.
+        Fast selective re-indexing for specific collections.
+        Defaults to lightweight, frequently updated sources (car_catalog and auto_news),
+        leaving the large statutory (laws) and Supreme Court datasets untouched.
         """
         if not target_collections:
             target_collections = [COLLECTION_CARS, COLLECTION_NEWS]
@@ -551,10 +549,10 @@ class ChromaRAGIndexer:
             print(f"  • Целевые коллекции:   {', '.join(target_collections)}")
             print("=" * 76)
 
-        # 1. Загружаем существующий ParentStore
+        # 1. Load existing ParentStore
         self.load_parent_store()
 
-        # 2. Загружаем существующие BM25 индексы
+        # 2. Load existing BM25 indices
         bm25_store = {}
         if self.bm25_store_path.exists():
             try:
@@ -571,7 +569,7 @@ class ChromaRAGIndexer:
             "mode": "partial"
         }
 
-        # 3. Выборочный чанкинг запрошенных коллекций
+        # 3. Selective chunking for requested collections
         chunks_map: Dict[str, Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], str]] = {}
 
         if COLLECTION_CARS in target_collections or "cars" in target_collections or "car_catalog" in target_collections:
@@ -594,13 +592,13 @@ class ChromaRAGIndexer:
             l_chunks, l_parents = RAGChunker.chunk_legal_docs()
             chunks_map[COLLECTION_LAWS] = (l_chunks, l_parents, "Нормативная база (ГК/НК РФ)")
 
-        # 4. Обновляем ParentStore только для выбранных коллекций
+        # 4. Merge updated collections into ParentStore
         for coll_name, (chunks, parents, label) in chunks_map.items():
             self.parent_store.update(parents)
         self.save_parent_store()
         stats["parent_docs_count"] = len(self.parent_store)
 
-        # 5. Обновляем ChromaDB (с явной embedding-функцией) и BM25
+        # 5. Update ChromaDB (with explicit embedding function) and BM25
         emb_fn = self._init_embedding_function() if self.client else None
         for coll_name, (chunks, parents, label) in chunks_map.items():
             c_len = len(chunks)
@@ -637,12 +635,12 @@ class ChromaRAGIndexer:
                 except Exception as ex:
                     logger.warning(f"Ошибка выборочного обновления Chroma ({coll_name}): {ex}")
 
-            # Обновление и полная сериализация индекса BM25 для этой коллекции
+            # Rebuild and serialize BM25 index for this collection
             bm25 = SimpleBM25Index()
             bm25.build(chunks)
             bm25_store[coll_name] = bm25.to_dict()
 
-            # Сохранение резервного JSON с чанками
+            # Persist backup chunks JSON
             chunk_backup_file = CHROMA_DIR / f"{coll_name}_chunks.json"
             with open(chunk_backup_file, "w", encoding="utf-8") as f:
                 json.dump(chunks, f, ensure_ascii=False, indent=2)
@@ -650,7 +648,7 @@ class ChromaRAGIndexer:
             stats["collections"][coll_name] = c_len
             stats["total_chunks"] += c_len
 
-        # Сохраняем объединенный BM25 файл
+        # Persist combined BM25 index store
         with open(self.bm25_store_path, "w", encoding="utf-8") as f:
             json.dump(bm25_store, f, ensure_ascii=False)
 

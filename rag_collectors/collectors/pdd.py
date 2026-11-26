@@ -28,13 +28,11 @@ from config.settings import (
 
 class PDDCollector(BaseCollector):
     """
-    Коллектор Правил дорожного движения РФ (ПДД РФ) в формате PDF с официального портала ГИБДД РФ.
-    URL: https://гибдд.рф/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf
-    (punycode: https://xn--b1aew.xn--p1ai/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf)
+    Collector for official Russian Traffic Rules (PDD RF) PDF from gibdd.ru.
+    URL: https://xn--b1aew.xn--p1ai/upload/site1000/folder_document/link/Pravila_dorozhnogo_dvizheniya.pdf
 
-    Парсит официальный документ, производит абзацный чанкинг (по пунктам 1.1-26.x,
-    обязанностям водителя, знакам и допуску ТС к эксплуатации)
-    и сохраняет структурированный JSON в data/pdd/pdd_rules_rag.json.
+    Extracts and parses chapters 1-26, vehicle admission rules, and the vehicle fault list
+    into structured JSONL (data/pdd/pdd_chapters.jsonl) and RAG JSON (data/pdd/pdd_rules_rag.json).
     """
 
     def __init__(self):
@@ -99,46 +97,45 @@ class PDDCollector(BaseCollector):
     @staticmethod
     def clean_pdd_text(text: str) -> str:
         """
-        Очистка и форматирование текста ПДД РФ:
-        - Замена конструкции <*> на текст из сноски (курсивом).
-        - Устранение рваных переносов и склейка абзацев.
-        - Выделение слов в кавычках жирным шрифтом (**"..."** / **«...»**).
-        - Выделение подпунктов и пунктов курсивом (*2.1.1(1)*, *2.7.*, *12.1* и т.д.).
+        Clean and format PDD RF text:
+        - Replace <*> markers with italicized footnote text.
+        - Rejoin hyphenated line breaks and collapse single newlines.
+        - Bold quoted phrases and italicize clause numbers (e.g. 2.1.1(1), 2.7).
         """
         if not text:
             return ""
 
-        # 1. Обработка сносок: ищем блок вида "-------------------------------- <*> Текст сноски"
+        # 1. Process footnotes matching "-------------------------------- <*> Footnote text"
         footnote_pattern = r'--------------------------------\s*<\*>\s*([^\n]+)'
         match_fn = re.search(footnote_pattern, text)
         if match_fn:
             fn_text = match_fn.group(1).strip()
-            # Удаляем блок сноски из текста
+            # Remove footer block from text
             text = re.sub(footnote_pattern, '', text)
-            # Заменяем все маркеры <*> в тексте на текст сноски курсивом
+            # Replace inline <*> markers with italicized footnote text
             text = text.replace('<*>', f'*{fn_text}*')
 
-        # Очищаем остатки линий разделения сносок
+        # Strip leftover separator rules
         text = re.sub(r'-{3,}', '', text)
 
-        # 2. Устранение переносов слов через дефис
+        # 2. Rejoin hyphenated line breaks
         text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
 
-        # 3. Замена одиночных переносов строк на пробелы, сохраняя важные разрывы
+        # 3. Collapse single line breaks into spaces while preserving paragraph boundaries
         clean_pattern = r'(?<!\n)\n(?!\n|\s*["\'«„]|\s*[А-ЯЁA-Z]|\s*\d+(?:\.\d+)*\.?)'
         text = re.sub(clean_pattern, ' ', text)
 
-        # 4. Превращаем оставшиеся структурированные переносы в двойные (\n\n) для абзацев
+        # 4. Normalize structural breaks to double newlines
         text = re.sub(r'\n+', '\n\n', text)
 
-        # 5. Удаление множественных пробелов и табуляций
+        # 5. Collapse extra spaces and tabs
         text = re.sub(r'[ \t]+', ' ', text)
 
-        # 6. Все слова в кавычках — жирным (поддерживаются как двойные кавычки, так и «ёлочки»)
+        # 6. Bold quoted terms
         text = re.sub(r'"([^"]+)"', r'**"\1"**', text)
         text = re.sub(r'«([^»]+)»', r'**«\1»**', text)
 
-        # 7. Все подпункты и пункты (например, 2.1.1(1), 2.7., 2.6.1, 12.1) — курсивом
+        # 7. Italicize numbered clauses (e.g. 2.1.1(1), 2.7., 12.1)
         item_pattern = r'\b(\d+\.\d+(?:\.\d+)?(?:\(\d+\))?\.?)\b'
         text = re.sub(item_pattern, r'*\1*', text)
 
@@ -146,12 +143,10 @@ class PDDCollector(BaseCollector):
 
 
     def _parse_pdd_chapters(self, full_text: str, test_mode: bool = False) -> List[Dict[str, Any]]:
-        """
-        Парсинг ПДД РФ с предварительной очисткой и форматированием.
-        """
+        """Parse PDD chapters with prior cleaning and Markdown formatting."""
         chapters = []
 
-        # 1. Поиск маркера старта ПДД
+        # 1. Locate start marker of Chapter 1
         start_pattern = re.compile(
             r'(?:1\.\s+)?Общие\s+положения',
             re.IGNORECASE | re.DOTALL
@@ -165,15 +160,15 @@ class PDDCollector(BaseCollector):
             self.logger.warning("⚠️ Точный маркер старта не найден, используем весь текст.")
             work_text = full_text
 
-        # --- ПРИМЕНЕНИЕ ФУНКЦИИ ОЧИСТКИ И ФОРМАТИРОВАНИЯ ---
+        # --- Apply text normalization and Markdown formatting ---
         work_text = self.clean_pdd_text(work_text)
-        # ---------------------------------------------------
+        # ------------------------------------------------------
 
-        # 2. Находим границу начала Приложений, чтобы отсечь знаки, разметку и Сочи
+        # 2. Locate Appendices boundary to separate core chapters from sign/marking appendices
         app_cut = re.search(r'Приложение\s+1\s+к\s+Правилам\s+дорожного\s+движения', work_text, re.IGNORECASE)
         main_body_text = work_text[:app_cut.start()] if app_cut else work_text
 
-        # 3. Регулярное выражение для поиска глав с 1 по 26
+        # 3. Match core chapters 1-26
         chapter_pattern = re.compile(
             r'(?:^|\n)\s*\*?([1-9]|1[0-9]|2[0-6])\.\*?(?![\d])\s+([А-ЯЁ][^\n]+)',
             re.MULTILINE
@@ -203,7 +198,7 @@ class PDDCollector(BaseCollector):
                 if test_mode:
                     break
 
-        # 4. Обрабатываем блоки после приложений (Основные положения и Перечень неисправностей)
+        # 4. Extract post-appendix sections (Vehicle Admission Rules & Fault List)
         rest_text = work_text[app_cut.start():] if app_cut else ""
 
         m_admit = re.search(r'ОСНОВНЫЕ\s+ПОЛОЖЕНИЯ\s+ПО\s+ДОПУСКУ\s+ТРАНСПОРТНЫХ\s+СРЕДСТВ', rest_text, re.IGNORECASE)
@@ -246,7 +241,7 @@ class PDDCollector(BaseCollector):
         self.logger.info(f"🚀 ЗАПУСК СБОРА И ПАРСИНГА ПДД РФ ({mode_str})")
         self.logger.info("=" * 70)
 
-        # Проверяем наличие скачанного файла или пробуем скачать
+        # Ensure PDF exists locally or download it
         if not self.output_pdf.exists():
             self._download_pdf()
 
@@ -257,7 +252,7 @@ class PDDCollector(BaseCollector):
             chapters = self._parse_pdd_chapters(extracted_text, test_mode=test_mode)
             self.logger.info(f"Сформировано структурированных глав из PDF: {len(chapters)}")
 
-        # Сохранение в data/pdd/pdd_chapters.jsonl
+        # Save to data/pdd/pdd_chapters.jsonl
         with open(self.output_chapters, "w", encoding="utf-8") as f_jsonl:
             for ch in chapters:
                 rec = {
@@ -277,7 +272,7 @@ class PDDCollector(BaseCollector):
                 }
                 f_jsonl.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        # Сохранение в эталонный pdd_rules_rag.json
+        # Save legacy RAG JSON output
         rag_rules = [{
             "section_number": ch["section_number"],
             "section_title": ch["chapter_title"],

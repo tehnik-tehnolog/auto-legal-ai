@@ -1,15 +1,15 @@
 """
-Интеграция с Backblaze B2 Cloud Storage (S3-совместимый API через boto3).
-Используется на Render для:
-1. Хранения документов, прикрепляемых пользователями в чате (PDF, DOCX, TXT).
-2. Синхронизации базы знаний (data/legal, data/pdd, data/chroma и т.д.) при холодном старте.
+Backblaze B2 Cloud Storage integration (S3-compatible API via boto3).
+Used in cloud/OpenShift deployments for:
+1. Storing user-uploaded chat documents (PDF, DOCX, TXT).
+2. Syncing the knowledge base (legal, pdd, court, news, cars, chroma) on startup.
 """
 
 import argparse
 import logging
 import mimetypes
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,9 +24,20 @@ from rag_pipeline.config import (
 
 logger = logging.getLogger("b2_storage")
 
+KB_SUBDIRS = ("legal", "pdd", "court", "news", "cars", "chroma")
+
+
+def _normalize_kb_relative_path(raw_key: str) -> str:
+    rel = raw_key.lstrip("/")
+    if rel.startswith("kb/"):
+        rel = rel[len("kb/"):]
+    elif rel.startswith("data/"):
+        rel = rel[len("data/"):]
+    return rel.lstrip("/")
+
 
 class B2StorageManager:
-    """Клиент для работы с бакетом Backblaze B2"""
+    """Client wrapper for Backblaze B2 bucket operations."""
 
     _client = None
     _resolved_bucket: Optional[str] = None
@@ -55,7 +66,7 @@ class B2StorageManager:
             )
             return cls._client
         except Exception as e:
-            logger.error(f"Ошибка инициализации клиента Backblaze B2: {e}")
+            logger.error(f"Failed to initialize Backblaze B2 client: {e}")
             return None
 
     @classmethod
@@ -72,10 +83,10 @@ class B2StorageManager:
             buckets = resp.get("Buckets", [])
             if buckets:
                 cls._resolved_bucket = buckets[0]["Name"]
-                logger.info(f"Автоматически выбран бакет Backblaze B2: {cls._resolved_bucket}")
+                logger.info(f"Auto-selected Backblaze B2 bucket: {cls._resolved_bucket}")
                 return cls._resolved_bucket
         except Exception as e:
-            logger.warning(f"Не удалось получить список бакетов B2 (задайте B2_BUCKET_NAME): {e}")
+            logger.warning(f"Failed to list Backblaze B2 buckets (set B2_BUCKET_NAME explicitly): {e}")
         return None
 
     @classmethod
@@ -85,7 +96,7 @@ class B2StorageManager:
         data: bytes,
         content_type: Optional[str] = None,
     ) -> Optional[str]:
-        """Загрузка байтов в Backblaze B2. Возвращает object_key при успехе."""
+        """Upload raw bytes to Backblaze B2. Returns object_key on success."""
         client = cls.get_client()
         bucket = cls.get_bucket_name()
         if not client or not bucket:
@@ -102,15 +113,15 @@ class B2StorageManager:
                 Body=data,
                 ContentType=content_type,
             )
-            logger.info(f"Файл загружен в B2: s3://{bucket}/{object_key} ({len(data)} байт)")
+            logger.info(f"Uploaded to B2: s3://{bucket}/{object_key} ({len(data)} bytes)")
             return object_key
         except Exception as e:
-            logger.error(f"Ошибка загрузки объекта '{object_key}' в B2: {e}")
+            logger.error(f"Failed to upload '{object_key}' to B2: {e}")
             return None
 
     @classmethod
     def download_bytes(cls, object_key: str) -> Optional[bytes]:
-        """Скачивание объекта из Backblaze B2."""
+        """Download an object from Backblaze B2."""
         client = cls.get_client()
         bucket = cls.get_bucket_name()
         if not client or not bucket:
@@ -119,12 +130,12 @@ class B2StorageManager:
             resp = client.get_object(Bucket=bucket, Key=object_key)
             return resp["Body"].read()
         except Exception as e:
-            logger.error(f"Ошибка скачивания '{object_key}' из B2: {e}")
+            logger.error(f"Failed to download '{object_key}' from B2: {e}")
             return None
 
     @classmethod
     def get_presigned_url(cls, object_key: str, expires_in: int = 3600) -> Optional[str]:
-        """Генерация временной ссылки на скачивание файла из B2."""
+        """Generate a temporary presigned download URL for a B2 object."""
         client = cls.get_client()
         bucket = cls.get_bucket_name()
         if not client or not bucket:
@@ -136,7 +147,7 @@ class B2StorageManager:
                 ExpiresIn=expires_in,
             )
         except Exception as e:
-            logger.warning(f"Ошибка генерации presigned URL для '{object_key}': {e}")
+            logger.warning(f"Failed to generate presigned URL for '{object_key}': {e}")
             return None
 
     @classmethod
@@ -147,81 +158,114 @@ class B2StorageManager:
         filename: str,
         file_bytes: bytes,
     ) -> Optional[str]:
-        """Сохранение прикрепленного файла пользователя в бакет B2."""
+        """Persist a user chat attachment in the Backblaze B2 bucket."""
         safe_email = re.sub(r"[^a-zA-Z0-9_.-]", "_", user_email.lower())
         safe_chat = re.sub(r"[^a-zA-Z0-9_-]", "_", chat_id)
-        safe_name = re.sub(r"[^a-zA-Zа-яА-Я0-9_.-]", "_", filename)
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9_.-]", "_", filename)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         key = f"attachments/{safe_email}/{safe_chat}/{ts}_{safe_name}"
         return cls.upload_bytes(key, file_bytes)
 
     @classmethod
+    def _list_objects_by_prefix(cls, client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
+        paginator = client.get_paginator("list_objects_v2")
+        items: List[Dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            items.extend(page.get("Contents", []))
+        return items
+
+    @classmethod
     def sync_kb_from_b2(cls, target_data_dir: Path = DATA_DIR) -> Dict[str, Any]:
         """
-        Синхронизация файлов базы знаний (префикс kb/) из Backblaze B2 на локальный эфемерный диск
-        при запуске на Render Free Tier (если локальные файлы отсутствуют).
+        Sync knowledge base files from Backblaze B2 into target_data_dir.
+        Supports multiple bucket layouts: 'kb/', 'data/', or root subdirectories ('legal/', 'pdd/', etc.).
         """
-        result = {"configured": cls.is_configured(), "downloaded": 0, "skipped": 0, "errors": 0}
+        result = {"configured": cls.is_configured(), "prefix": None, "downloaded": 0, "skipped": 0, "errors": 0}
         if not cls.is_configured():
             return result
 
         client = cls.get_client()
         bucket = cls.get_bucket_name()
         if not client or not bucket:
+            result["errors"] += 1
             return result
 
         try:
-            paginator = client.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket, Prefix="kb/"):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    rel_path = key[len("kb/"):].lstrip("/")
-                    if not rel_path or rel_path.endswith("/"):
-                        continue
-                    local_path = target_data_dir / rel_path
-                    if local_path.exists() and local_path.stat().st_size == obj.get("Size", -1):
-                        result["skipped"] += 1
-                        continue
-                    local_path.parent.mkdir(parents=True, exist_ok=True)
-                    client.download_file(bucket, key, str(local_path))
-                    result["downloaded"] += 1
-            logger.info(f"Синхронизация БЗ из B2 завершена: {result}")
+            objects = cls._list_objects_by_prefix(client, bucket, "kb/")
+            prefix_used = "kb/"
+
+            if not objects:
+                data_objs = cls._list_objects_by_prefix(client, bucket, "data/")
+                if data_objs:
+                    objects = data_objs
+                    prefix_used = "data/"
+
+            if not objects:
+                root_objs: List[Dict[str, Any]] = []
+                for sub in KB_SUBDIRS:
+                    root_objs.extend(cls._list_objects_by_prefix(client, bucket, f"{sub}/"))
+                if root_objs:
+                    objects = root_objs
+                    prefix_used = "root"
+
+            result["prefix"] = prefix_used
+
+            for obj in objects:
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                rel_path = _normalize_kb_relative_path(key)
+                if not rel_path:
+                    continue
+                top_dir = rel_path.split("/")[0]
+                if top_dir not in KB_SUBDIRS or "/cache/" in rel_path or rel_path.startswith("cache/"):
+                    continue
+
+                local_path = target_data_dir / rel_path
+                if local_path.exists() and local_path.stat().st_size == obj.get("Size", -1):
+                    result["skipped"] += 1
+                    continue
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                client.download_file(bucket, key, str(local_path))
+                result["downloaded"] += 1
+
+            logger.info(f"B2 KB sync finished: {result}")
         except Exception as e:
-            logger.warning(f"Ошибка синхронизации БЗ из Backblaze B2: {e}")
+            logger.warning(f"Failed to sync KB from Backblaze B2: {e}")
             result["errors"] += 1
         return result
 
     @classmethod
     def upload_kb_to_b2(cls, source_data_dir: Path = DATA_DIR) -> Dict[str, Any]:
-        """Загрузка локальной базы знаний (data/{legal,pdd,court,news,cars,chroma}) в B2 под префикс kb/."""
+        """Upload local knowledge base files (data/{legal,pdd,court,news,cars,chroma}) to B2 under kb/."""
         result = {"uploaded": 0, "errors": 0, "files": []}
         if not cls.is_configured():
-            logger.error("Backblaze B2 не настроен (проверьте B2_ENDPOINT, B2_KEY_ID, B2_APPLICATION_KEY).")
+            logger.error("Backblaze B2 is not configured (check B2_ENDPOINT, B2_KEY_ID, B2_APPLICATION_KEY).")
             return result
 
         client = cls.get_client()
         bucket = cls.get_bucket_name()
         if not client or not bucket:
-            logger.error("Не найден бакет Backblaze B2.")
+            logger.error("Backblaze B2 bucket not found.")
             return result
 
-        target_subdirs = ["legal", "pdd", "court", "news", "cars", "chroma"]
-        for sub in target_subdirs:
+        for sub in KB_SUBDIRS:
             sub_dir = source_data_dir / sub
             if not sub_dir.exists():
                 continue
             for file_path in sub_dir.rglob("*"):
                 if not file_path.is_file():
                     continue
-                # Пропускаем тяжелые бинарники ChromaDB sqlite при желании или загружаем все
                 rel = file_path.relative_to(source_data_dir).as_posix()
+                if "/cache/" in rel or rel.startswith("cache/"):
+                    continue
                 b2_key = f"kb/{rel}"
                 try:
                     client.upload_file(str(file_path), bucket, b2_key)
                     result["uploaded"] += 1
                     result["files"].append(b2_key)
                 except Exception as e:
-                    logger.error(f"Ошибка загрузки {file_path} в {b2_key}: {e}")
+                    logger.error(f"Failed to upload {file_path} to {b2_key}: {e}")
                     result["errors"] += 1
         return result
 
@@ -229,7 +273,7 @@ class B2StorageManager:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backblaze B2 Knowledge Base Sync")
     parser.add_argument("--upload-kb", action="store_true", help="Upload local data/ KB to B2 kb/ prefix")
-    parser.add_argument("--sync-kb", action="store_true", help="Download B2 kb/ prefix to local data/")
+    parser.add_argument("--sync-kb", action="store_true", help="Download B2 KB into local data/")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

@@ -1,3 +1,6 @@
+# Standalone Data Collectors Requirements (used by rag_collectors/runner.py)
+# Install together with indexing dependencies via ../requirements-ingest.txt
+
 playwright>=1.42.0
 requests>=2.31.0
 beautifulsoup4>=4.12.3

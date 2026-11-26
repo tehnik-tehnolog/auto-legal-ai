@@ -18,10 +18,9 @@ from config.settings import CARS_DIR, HTTP_TIMEOUT, RASKATOF_URL, USER_AGENT
 
 class CarsCollector(BaseCollector):
     """
-    Коллектор ассортимента доступных автомобилей с сайта raskatof.ru.
-    Регламент запуска: Раз в неделю.
-    Формат: Структурированные карточки авто (cars_raskatof.json)
-    и RAG-документы (cars_raskatof_rag.json).
+    Collector for available vehicles catalog from raskatof.ru.
+    Schedule: Weekly.
+    Output: structured vehicle cards (cars_raskatof.json) and RAG docs (cars_raskatof_rag.json).
     """
 
     def __init__(self):
@@ -51,16 +50,16 @@ class CarsCollector(BaseCollector):
         current_category = "Эконом и комфорт класс"
 
         for item in choose_items:
-            # Проверка изменения категории (Бизнес / Эконом)
+            # Track vehicle class transition (Business / Economy)
             prev_heading = item.find_previous("h3", class_="section-subtitle")
             if prev_heading and "Бизнес" in prev_heading.get_text():
                 current_category = "Бизнес класс"
 
-            # Модель
+            # Model name
             model_elem = item.find("h4", class_="choose-model")
             model_name = model_elem.get_text(strip=True) if model_elem else "Не указано"
 
-            # Характеристики
+            # Vehicle specs
             specs = {}
             specs_container = item.find("div", class_="choose-basic-specs")
             if specs_container:
@@ -70,7 +69,7 @@ class CarsCollector(BaseCollector):
                         key, val = text.split(":", 1)
                         specs[key.strip()] = val.strip()
 
-            # Опции
+            # Trim features
             features = []
             features_container = item.find("div", class_="extra-features")
             if features_container:
@@ -82,7 +81,7 @@ class CarsCollector(BaseCollector):
                     if p_text:
                         features = [p_text.get_text(strip=True)]
 
-            # Условия аренды / раската
+            # Rental / buyout terms
             leasing_info = {}
             leasing_container = item.find("div", class_="leasing-info")
             if leasing_container:
@@ -104,7 +103,7 @@ class CarsCollector(BaseCollector):
             }
             cars_data.append(car_obj)
 
-            # Генерация структурированного текстового документа для векторной базы RAG
+            # Generate structured text document for RAG vector store
             specs_text = ", ".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "не указаны"
             features_text = "; ".join(features) if features else "стандартная комплектация"
             daily = leasing_info.get("daily_rate", "уточняйте")
@@ -132,7 +131,7 @@ class CarsCollector(BaseCollector):
                 }
             })
 
-        # Сохранение обоих форматов
+        # Persist both catalog JSON and RAG JSON formats
         with open(self.output_json, "w", encoding="utf-8") as f:
             json.dump(cars_data, f, ensure_ascii=False, indent=2)
 

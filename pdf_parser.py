@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Парсер судебных постановлений ВС РФ из PDF в JSON для RAG.
-Поддерживает проверку на 1 документе для экспресс-теста:
+PDF parser for Supreme Court rulings into JSON format for RAG.
+Supports single-document express verification:
     python pdf_parser.py --test
     python pdf_parser.py --limit 1
 """
@@ -27,7 +27,7 @@ headers = {
 
 
 def clean_extracted_text(text: str) -> str:
-    """Очистка судебного текста от лишних переносов строк и пробелов"""
+    """Clean extracted judicial text by removing stray line breaks and extra whitespace."""
     if not text:
         return ""
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
@@ -37,7 +37,7 @@ def clean_extracted_text(text: str) -> str:
 
 
 def download_and_extract_pdf(url: str, retries=3) -> str:
-    """Скачивание PDF с несколькими попытками при тайм-ауте"""
+    """Download PDF with retries on transient network/timeout errors."""
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers, timeout=35)

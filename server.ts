@@ -11,7 +11,6 @@ import {
   PDD_CHAPTERS_FILE,
   SERVER_PORT,
   UI_DIR,
-  WEBHOOK_BASE_URL,
 } from './server/config';
 import { dbService } from './server/db';
 import { extractTextFromFile } from './server/fileExtractor';
@@ -46,22 +45,6 @@ function cleanupOldJobs(): void {
       jobsRegistry.delete(id);
     }
   }
-}
-
-function triggerRenderWakeup(): void {
-  if (!WEBHOOK_BASE_URL) return;
-  void (async () => {
-    for (const suffix of ['/api/health', '/']) {
-      try {
-        await fetch(`${WEBHOOK_BASE_URL}${suffix}`, {
-          signal: AbortSignal.timeout(5000),
-        });
-        break;
-      } catch {
-        // ignore transient wake-up failure
-      }
-    }
-  })();
 }
 
 async function resolveAuthenticatedEmail(req: Request): Promise<string | null> {
@@ -111,9 +94,15 @@ async function startServer(): Promise<void> {
   app.use(express.json({ limit: '2mb' }));
   app.use('/ui', express.static(UI_DIR));
 
-  // Healthcheck endpoints (Render + AI Studio)
-  app.get(['/api/health', '/_stcore/health'], (_req: Request, res: Response) => {
-    res.json({ ok: true, b2: b2Storage.isConfigured(), supabase: dbService.isSupabaseConfigured() });
+  // Healthcheck endpoints (Red Hat OpenShift probes & monitoring)
+  app.get(['/api/health', '/healthz'], (_req: Request, res: Response) => {
+    res.json({
+      ok: true,
+      b2: b2Storage.isConfigured(),
+      b2Sync: b2Storage.getSyncStatus(),
+      supabase: dbService.isSupabaseConfigured(),
+      kb: ragEngine.getStats(),
+    });
   });
 
   // Silent device auto-login session check
@@ -196,9 +185,19 @@ async function startServer(): Promise<void> {
     }
   });
 
-  // KB stats
+  // KB stats & manual B2 re-sync endpoint
   app.get('/api/kb/stats', (_req: Request, res: Response) => {
     res.json(ragEngine.getStats());
+  });
+
+  app.post('/api/kb/sync', async (_req: Request, res: Response) => {
+    if (!b2Storage.isConfigured()) {
+      res.status(400).json({ error: 'Backblaze B2 is not configured.' });
+      return;
+    }
+    const summary = await b2Storage.syncKbFromB2(DATA_DIR);
+    ragEngine.reload();
+    res.json({ summary, status: b2Storage.getSyncStatus(), kb: ragEngine.getStats() });
   });
 
   // Legal docs catalog & single-doc lookup
@@ -401,7 +400,6 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      triggerRenderWakeup();
       cleanupOldJobs();
 
       let extractedText = '';
@@ -547,19 +545,29 @@ async function startServer(): Promise<void> {
 
   app.listen(SERVER_PORT, '0.0.0.0', () => {
     console.log(`[Server] Legal RAG Express + React listening on http://0.0.0.0:${SERVER_PORT}`);
-    // Hydrate KB from B2 if any core KB file is missing and warm up BM25 indices in background
+    // Hydrate KB from Backblaze B2 if any core KB file is missing and warm up BM25 indices in background
     void (async () => {
-      const needsB2Sync =
-        !fs.existsSync(LEGAL_CHAPTERS_FILE) ||
-        !fs.existsSync(PDD_CHAPTERS_FILE) ||
-        !fs.existsSync(path.join(CHROMA_DIR, 'legal_laws_chunks.json')) ||
-        !fs.existsSync(path.join(CHROMA_DIR, 'parent_store.json'));
+      const hasCoreKb = () =>
+        fs.existsSync(LEGAL_CHAPTERS_FILE) &&
+        fs.existsSync(PDD_CHAPTERS_FILE) &&
+        fs.existsSync(path.join(CHROMA_DIR, 'legal_laws_chunks.json')) &&
+        fs.existsSync(path.join(CHROMA_DIR, 'parent_store.json'));
+
+      const needsB2Sync = !hasCoreKb();
 
       if (b2Storage.isConfigured() && (needsB2Sync || process.env.B2_AUTO_SYNC === 'true')) {
-        console.log('[B2] Syncing KB from Backblaze B2...');
-        await b2Storage.syncKbFromB2(DATA_DIR);
+        console.log(`[B2] Starting KB sync into ${DATA_DIR}...`);
+        const summary = await b2Storage.syncKbFromB2(DATA_DIR);
+        if (needsB2Sync && summary.errors > 0 && summary.downloaded === 0) {
+          console.warn('[B2] Initial sync encountered errors; retrying once in 5s...');
+          await new Promise((r) => setTimeout(r, 5000));
+          await b2Storage.syncKbFromB2(DATA_DIR);
+        }
         ragEngine.reload();
       } else {
+        if (needsB2Sync && !b2Storage.isConfigured()) {
+          console.warn('[B2] Core KB files are missing and Backblaze B2 env vars are not set.');
+        }
         ragEngine.ensureLoaded();
       }
       if (dbService.isSupabaseConfigured()) {
